@@ -1,6 +1,7 @@
 # The RDBMS boundary, categorically
 
-**Design note. Nothing here is built yet.**
+**Sections 1–5 are implemented and green.** `lib/sodalite/db/`, `test/db_test.rb`,
+`test/db_conformance_test.rb`. Section 7 lists what is deliberately still absent.
 
 Sodalite already says the world is a parameter. Today that world is a bag of lambdas: a route performs
 `:find_user`, and a handler map answers it. That works, and it is also the weakest part of the design,
@@ -8,8 +9,9 @@ because the bag has no laws. Nothing relates `:find_user` to `:insert_user`. Not
 handlers and the real handlers are two versions of the same thing. A test passes because someone wrote
 a stub that happened to return the right shape.
 
-This note asks what the database boundary looks like if that gap is closed properly, and what the
-existing pieces already force.
+This note works out what the database boundary looks like once that gap is closed, and what the
+existing pieces already force. The two-model conformance suite in section 5 is the part that turns the
+argument into something a test runner can settle.
 
 ## What is already categorical here
 

@@ -119,6 +119,46 @@ dead-ends backtracks rather than shadowing a parameter route that would have mat
 split before they are percent-decoded, so `%2F` is data inside one segment and never invents a path
 separator.
 
+## The database is a theory with models
+
+`Sodalite::DB` replaces "the handler map is a bag of lambdas" with a fixed relational signature, so a
+handler map becomes a *model* of a theory rather than a model of nothing.
+
+```ruby
+SCHEMA = Sodalite::DB.schema(
+  users: { id: :integer, name: :string, city: :string },
+  posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
+)
+
+in_tokyo = SCHEMA[:posts].where(:title, 'hello').follow(:author).where(:city, 'tokyo').select(:name)
+```
+
+A schema is a finitely presented category: tables are objects, foreign keys are morphisms, and an
+instance is a functor into `Set` — so a dangling foreign key is not a bad row, it is a failure to be a
+functor, and `model.functor?` says so. There is no `join` in the query language: `follow` is
+composition, and the join is what the compiler emits.
+
+```
+SELECT DISTINCT t1.name FROM posts t0 JOIN users t1 ON t0.author = t1.id
+WHERE t0.title = ? AND t1.city = ?
+```
+
+`DB.memory` (an instance functor into Set) and `DB.sql` (arrows compiled to SQL) are two models of one
+theory, not a stub and the real thing — and `test/db_conformance_test.rb` checks that they agree on
+the regular fragment. That is the upgrade: the fixed world no longer returns what a test author decided,
+it computes the same query somewhere cheaper.
+
+A transaction is a combinator whose handler runs the subtree, and rollback is what `Err` means to it:
+
+```ruby
+Sodalite::DB.atomically(:checkout, reserve >> charge >> confirm)
+```
+
+Nobody asks for the rollback. `berylx` short-circuits at the first `Err`, the scope sees it, and the
+failure still carries which named task produced it. [The design note](docs/rdbms.md) works through the
+category theory, and section 7 names the five places it does not reach — `NULL`, ordering, aggregation,
+isolation levels, and schema migration.
+
 ## Streaming
 
 The sieve reads NDJSON and SSE one record at a time; this writes them the same way, validating each
@@ -148,6 +188,7 @@ published yet, so development takes all three siblings from git.
 | Guide | What it covers |
 | --- | --- |
 | [The design](docs/design.md) | Why each layer is there, the two vocabularies, and what is deliberately not built |
+| [The RDBMS boundary](docs/rdbms.md) | The database as a theory with models: schemas as categories, queries as arrows, transactions as combinators |
 | [`examples/service.rb`](examples/service.rb) | A complete service, run twice — against a fixed world in process, and on Puma |
 
 ```sh

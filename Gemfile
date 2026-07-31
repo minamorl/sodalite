@@ -14,3 +14,8 @@ gem 'rubocop-minitest', '~> 0.35', require: false
 gem 'berylx', git: 'https://github.com/minamorl/berylx.git', branch: 'main'
 gem 'darkcore', git: 'https://github.com/minamorl/darkcore-ruby.git', branch: 'main'
 gem 'zeolite', git: 'https://github.com/minamorl/zeolite.git', branch: 'main'
+
+# The conformance suite needs a second, real model of the relational theory.
+# The library itself depends on no driver: `Sodalite::DB.sql` takes anything
+# answering `execute(sql, binds) -> rows`.
+gem 'sqlite3', '~> 2.0', require: false
