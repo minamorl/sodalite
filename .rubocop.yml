@@ -1,0 +1,53 @@
+plugins:
+  - rubocop-minitest
+
+AllCops:
+  NewCops: enable
+  TargetRubyVersion: 3.2
+  SuggestExtensions: false
+  Exclude:
+    - vendor/**/*
+    - tmp/**/*
+
+Style/Documentation:
+  Enabled: false
+
+Metrics/MethodLength:
+  Max: 20
+  Exclude:
+    - test/**/*
+    - examples/**/*
+
+Metrics/AbcSize:
+  Max: 20
+  Exclude:
+    - test/**/*
+    - examples/**/*
+
+Metrics/BlockLength:
+  Exclude:
+    - test/**/*
+    - examples/**/*
+    - "*.gemspec"
+
+Metrics/ClassLength:
+  Exclude:
+    - test/**/*
+
+Metrics/ModuleLength:
+  Exclude:
+    - test/**/*
+
+Layout/LineLength:
+  Max: 110
+  Exclude:
+    - test/**/*
+
+Minitest/MultipleAssertions:
+  Enabled: false
+
+# A declarative constructor names every part it takes. Keyword arguments carry
+# their meaning at the call site, so the readability problem this cop guards
+# against — a row of unlabelled positionals — does not arise.
+Metrics/ParameterLists:
+  CountKeywordArgs: false
