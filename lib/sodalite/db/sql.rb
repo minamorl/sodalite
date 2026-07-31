@@ -26,8 +26,63 @@ module Sodalite
           end
         end
 
-        ["SELECT DISTINCT #{columns(query, aliases)} FROM #{query.root} t0#{joins.join}" \
-         "#{" WHERE #{wheres.join(' AND ')}" unless wheres.empty?}", binds]
+        source = "FROM #{query.root} t0#{joins.join}#{where_clause(wheres)}"
+        [query.grouped? ? grouped(query, aliases, source) : flat(query, aliases, source), binds]
+      end
+
+      def flat(query, aliases, source)
+        "SELECT DISTINCT #{qualified_fields(query, aliases).join(', ')} #{source}" \
+          "#{order_by(query)}#{window(query)}"
+      end
+
+      # `follow` is composition **followed by image factorization**, so it yields
+      # a set. A SQL `JOIN` yields the pullback, which keeps one row per pair —
+      # so folding straight over the join counts multiplicities of the join
+      # rather than elements of the image, and `posts.follow(:author)` would
+      # report a city twice for an author with two posts.
+      #
+      # The image therefore has to be taken *before* the fold, which is what this
+      # derived table is. For an ungrouped root the DISTINCT is a no-op, so the
+      # same shape is correct either way.
+      #
+      # The two-model conformance suite is what caught this; nothing about the
+      # SQL looked wrong.
+      def grouped(query, aliases, source)
+        image = "SELECT DISTINCT #{qualified_fields(query, aliases).join(', ')} #{source}"
+        keys = query.grouping.map { |field| "g.#{field}" }
+        folds = query.aggregates.map do |aggregate|
+          "#{aggregate.monoid.sql.call("g.#{aggregate.field}")} AS #{aggregate.name}"
+        end
+        "SELECT #{(keys + folds).join(', ')} FROM (#{image}) g GROUP BY #{keys.join(', ')}" \
+          "#{order_by(query)}#{window(query)}"
+      end
+
+      def where_clause(wheres)
+        wheres.empty? ? '' : " WHERE #{wheres.join(' AND ')}"
+      end
+
+      def qualified_fields(query, aliases)
+        fields = query.projection || query.schema.table(query.carrier).fields
+        fields.map { |field| qualify(aliases, field) }
+      end
+
+      # The order that is actually applied is the total one, so the two models
+      # cannot disagree about how ties fall.
+      def order_by(query)
+        return '' unless query.ordered?
+
+        " ORDER BY #{query.total_ordering.map { |o| "#{o.field} #{o.direction.to_s.upcase}" }.join(', ')}"
+      end
+
+      def window(query)
+        return '' unless query.limit_rows || query.offset_rows
+
+        "#{query.limit_rows ? " LIMIT #{query.limit_rows}" : ' LIMIT -1'}" \
+          "#{" OFFSET #{query.offset_rows}" if query.offset_rows}"
+      end
+
+      def qualify(aliases, field)
+        "#{aliases.last[1]}.#{field}"
       end
 
       def follow(query, aliases, joins, step)
@@ -44,12 +99,6 @@ module Sodalite
         field, value = step
         wheres << "#{aliases.last[1]}.#{field} = ?"
         binds << value
-      end
-
-      def columns(query, aliases)
-        current = aliases.last[1]
-        fields = query.projection || query.schema.table(query.carrier).fields
-        fields.map { |field| "#{current}.#{field}" }.join(', ')
       end
 
       def insert_statement(table, row)
@@ -94,8 +143,10 @@ module Sodalite
 
       def select(query)
         sql, binds = SQL.compile(query)
-        fields = query.projection || @schema.table(query.carrier).fields
+        fields = query.output_fields
         rows = @connection.execute(sql, binds).map { |values| fields.zip(values).to_h }
+        return Listing[rows, schema: query.row_schema] if query.ordered?
+
         Relation[rows, schema: query.row_schema]
       end
 

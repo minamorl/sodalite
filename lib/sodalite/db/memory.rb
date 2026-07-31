@@ -47,7 +47,38 @@ module Sodalite
       def select(query)
         rows = @store.fetch(query.root).map(&:dup)
         query.steps.each { |step| rows = apply(step, rows) }
+        rows = fold(query, rows) if query.grouped?
+        return present(query, rows) if query.ordered?
+
         Relation[rows, schema: query.row_schema]
+      end
+
+      # A fold along the fibers of the grouping map: partition, then reduce each
+      # fibre into its monoid.
+      def fold(query, rows)
+        rows.group_by { |row| row.slice(*query.grouping) }
+            .map { |key, fibre| key.merge(query.aggregates.to_h { |agg| [agg.name, agg.fold(fibre)] }) }
+      end
+
+      # A total order, applied to the set. `<=>` down the ordering keys, with
+      # direction flipping the comparison rather than reversing afterwards, so a
+      # mixed asc/desc order is one pass.
+      def present(query, rows)
+        ordered = rows.sort do |left, right|
+          query.total_ordering.reduce(0) do |verdict, ordering|
+            next verdict unless verdict.zero?
+
+            compare(left[ordering.field], right[ordering.field], ordering.direction)
+          end
+        end
+        ordered = ordered.drop(query.offset_rows) if query.offset_rows
+        ordered = ordered.first(query.limit_rows) if query.limit_rows
+        Listing[ordered, schema: query.row_schema]
+      end
+
+      def compare(left, right, direction)
+        verdict = left <=> right
+        direction == :desc ? -verdict : verdict
       end
 
       def insert(table_name, row)

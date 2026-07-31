@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
+require_relative 'db/aggregate'
 require_relative 'db/schema'
 require_relative 'db/query'
+require_relative 'db/relation'
 require_relative 'db/memory'
 require_relative 'db/sql'
 

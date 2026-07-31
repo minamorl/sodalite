@@ -1,7 +1,6 @@
 # The RDBMS boundary, categorically
 
-**Sections 1–5 are implemented and green.** `lib/sodalite/db/`, `test/db_test.rb`,
-`test/db_conformance_test.rb`. Section 7 lists what is deliberately still absent.
+**Implemented and green.** `lib/sodalite/db/`, `test/db_test.rb`, `test/db_conformance_test.rb`.
 
 Sodalite already says the world is a parameter. Today that world is a bag of lambdas: a route performs
 `:find_user`, and a handler map answers it. That works, and it is also the weakest part of the design,
@@ -63,33 +62,89 @@ DB = Sodalite::DB.schema(
 )
 ```
 
-## 2. A query is an arrow, and it should stop being one at a named place
+## 2. Three phases, because they have three different sets of laws
 
-Given C, queries are built from four things:
+The first draft of this note said ordering and aggregation live outside a regular category, so they
+should be raw SQL. That is true about the category and useless as a design: a service without
+`GROUP BY` and `ORDER BY` is not a service.
+
+The mistake was treating "outside the fragment" as "outside the library". They are outside the
+*arrow*, which is a different claim. So the pipeline has three phases, held in three different places
+in the query rather than mixed into one list of steps:
+
+```
+arrow in C     composition / subobject / image     -> Relation, a set
+fold           a fold along the fibers of a map    -> Relation of groups
+presentation   a total order, then a window on it  -> Listing, a sequence
+```
+
+Each phase is optional, their order is fixed, and **all three are covered by the conformance suite** —
+the discipline extends rather than stopping at the fragment's edge.
+
+### Phase one: the arrow
 
 | operation | category-theoretic content | SQL |
 | --- | --- | --- |
-| follow a foreign key | composition in C | `JOIN` on a key |
-| join on a shared key | **pullback** of `A → K ← B` | `JOIN ... ON` |
-| filter | **subobject** of a table | `WHERE` |
-| project / dedupe | **image factorization** | `SELECT DISTINCT` |
+| `follow` | composition in C, then image | `JOIN` … `DISTINCT` |
+| `where` | a **subobject** | `WHERE` |
+| `select` | **image factorization** | `SELECT DISTINCT` |
 
-Composition, finite limits, and image factorization is precisely a **regular category**. That is not
-trivia — it is the boundary worth designing to:
+Composition, finite limits, and image factorization is a **regular category**. `UNION` needs
+coproducts; `NOT` needs Boolean structure, which is where SQL becomes three-valued logic. There is no
+`join` in the language: a join is what a compiler emits for a composition, and writing one by hand is
+implementing composition by hand.
 
-- The **regular fragment** (`∃`, `∧`, `=`) is closed, composes without surprises, and is preserved by
-  the functors we care about.
-- Adding `UNION` needs coproducts — a *coherent* category, still fine.
-- Adding `NOT` needs Boolean structure, and this is exactly where SQL stops being a category and starts
-  being three-valued logic with `NULL`.
+### Phase two: the fold
 
-So the design rule: **build the regular fragment, and make leaving it a declared act.** Raw SQL stays
-available, with a zeolite schema typing its result, so the escape hatch is as typed as the front door.
-Two doors, and the line between them is a theorem instead of taste. That is the same move as
-"`Zeolite.enum` is the only door from text to Symbol": one exception, named, and closed.
+`GROUP BY key` takes the map `key : A → K` and partitions A into its **fibers**. An aggregate is a
+fold over each fiber into a **monoid**, and that is not decoration — it says exactly which aggregates
+are well behaved:
 
-The alternative — an ORM query DSL that grows a method per SQL feature — has no such line, which is
-why every one of them eventually needs `.where("...")`.
+| aggregate | monoid |
+| --- | --- |
+| `count` | `(ℕ, +, 0)` |
+| `sum` | `(ℕ, +, 0)` |
+| `min` / `max` | `(A + 1, min/max, nothing)` — the identity is not in `A`, so it is adjoined |
+
+`avg` is deliberately absent: it is **not a monoid**, because averages do not combine associatively.
+Every implementation that offers it computes the pair `(sum, count)` and divides at the end, so write
+that pair and keep the division outside the fold, where it belongs. Notice that `min`/`max` adjoin the
+same `A + 1` that makes a nullable column honest — the two show up for one reason.
+
+### Phase three: the presentation
+
+An order does not change the set. It chooses a presentation of it — an iso to `{1..n}` — which is why
+an ordered query returns a `Listing` and not a `Relation`, and why `Relation` has no `first`. Two
+rules fall straight out and both are build errors:
+
+- **A window needs an order.** `LIMIT` without `ORDER BY` is not a function of the set; it is whatever
+  the storage engine felt like. Paginating on one is how rows repeat and vanish between pages.
+- **An order must be total**, or ties break arbitrarily and the two models are free to disagree. So
+  the identifying fields are appended, and `total_ordering` is what actually runs.
+
+### What the conformance suite caught
+
+The first version of the grouped SQL folded straight over the join. It was wrong, and nothing about
+the SQL looked wrong:
+
+```ruby
+posts.follow(:author).group(:city).count(:people)
+# memory: tokyo=1  (mina)          <- the image: a set of users
+# sql:    tokyo=2                  <- the pullback: one row per post
+```
+
+`follow` is composition **followed by image factorization**, so it yields a set. A SQL `JOIN` yields
+the pullback, which keeps one row per pair — so folding over the join counts multiplicities of the
+join rather than elements of the image. The image has to be materialised before the fold:
+
+```sql
+SELECT g.city, COUNT(*) AS people
+FROM (SELECT DISTINCT t1.id, t1.name, t1.city FROM posts t0 JOIN users t1 ON t0.author = t1.id) g
+GROUP BY g.city
+```
+
+This is the whole argument for the two-model check, arriving on the first extension after it was
+written. One model alone would have been self-consistently wrong.
 
 ## 3. The effect signature should be the relational theory, not the application's verbs
 
@@ -184,7 +239,8 @@ the same world. Right now it cannot. This is how it could.
   database. There are no mutable objects here.
 - **No ambient connection.** The pool is a handler's captured state, so "which database" is the same
   knob as "which world" — one mechanism, not two.
-- **No query DSL outside the regular fragment.** Beyond it, declared raw SQL with a typed result.
+- **No query DSL beyond the three phases.** `HAVING`, `UNION`, and `NOT` are not offered yet rather
+  than being quietly conflated with `where`; beyond them, declared raw SQL with a typed result.
 
 ## 7. Where the analogy breaks, said out loud
 
@@ -195,10 +251,10 @@ not reach:
    unknown. Honest treatment: a nullable column is a map into `A + 1`, and elimination must be
    explicit. Comparisons that would silently go three-valued should be a build error, the way an
    ambiguous route is.
-2. **Ordering and `LIMIT`.** Not limits or colimits — they need a linear order and a notion of "first
-   n". They are a decoration on a result, not part of the query algebra, and should be typed as such.
-3. **Aggregation.** `GROUP BY` is a fold along the fibers of a map `A → K`. That is real structure, but
-   it is not the regular fragment and must not pretend to be.
+2. **Ordering and `LIMIT`.** Not limits or colimits — they need a linear order. Implemented as phase
+   three, and typed as such: an ordered query returns a `Listing`, not a `Relation`.
+3. **Aggregation.** `GROUP BY` is a fold along the fibers of a map `A → K`. Implemented as phase two,
+   and restricted to the aggregates that are monoids, which is why `avg` is not offered.
 4. **Isolation levels.** No algebra makes `REPEATABLE READ` true. The transaction handler is sound
    *within* an isolation level, which is a parameter and not a theorem. Say so where it is chosen.
 5. **`Σ_F ⊣ Δ_F ⊣ Π_F`.** Spivak's adjoint triple is about *migration between schemas*, not querying

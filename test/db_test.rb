@@ -67,6 +67,57 @@ class DBQueryBuildTest < Minitest::Test
     assert_raises(Sodalite::DB::QueryError) { SCHEMA[:users].where(:city, nil) }
   end
 
+  # A window without an order is not a function of the set — it is whatever the
+  # storage engine felt like. Paginating on one is how rows repeat and vanish
+  # between pages, so it is a build error rather than a production surprise.
+  def test_a_window_without_an_order_is_a_build_error
+    assert_raises(Sodalite::DB::QueryError) { SCHEMA[:users].limit(10) }
+    assert_raises(Sodalite::DB::QueryError) { SCHEMA[:users].offset(10) }
+    SCHEMA[:users].order(:name).limit(10) # no raise
+  end
+
+  # An order that is not total is not a function of the set either, so the
+  # identifying fields are appended and the applied order is always total.
+  def test_an_order_is_completed_to_a_total_one
+    applied = SCHEMA[:users].order(:city).total_ordering
+
+    assert_equal %i[city id], applied.map(&:field)
+    assert_equal %i[asc asc], applied.map(&:direction)
+  end
+
+  def test_a_grouped_order_is_completed_by_its_grouping_keys
+    applied = SCHEMA[:users].group(:city).count(:people).order(:people, :desc).total_ordering
+
+    assert_equal %i[people city], applied.map(&:field)
+  end
+
+  # The fold consumes the relation, so the regular fragment closes when it
+  # starts. A subobject of a grouped relation is HAVING — a different operation,
+  # not offered rather than quietly conflated with WHERE.
+  def test_the_fragment_closes_where_the_fold_begins
+    grouped = SCHEMA[:users].group(:city).count(:people)
+
+    assert_raises(Sodalite::DB::QueryError) { grouped.where(:city, 'tokyo') }
+    assert_raises(Sodalite::DB::QueryError) { grouped.follow(:author) }
+    assert_raises(Sodalite::DB::QueryError) { grouped.select(:city) }
+  end
+
+  def test_an_aggregate_needs_a_group_to_fold_over
+    assert_raises(Sodalite::DB::QueryError) { SCHEMA[:users].count(:people) }
+  end
+
+  def test_ordering_by_something_that_is_not_in_the_result_is_a_build_error
+    assert_raises(Sodalite::DB::QueryError) { SCHEMA[:users].select(:name).order(:city) }
+    assert_raises(Sodalite::DB::QueryError) { SCHEMA[:users].group(:city).count(:people).order(:name) }
+  end
+
+  # `avg` is absent because it is not a monoid: averages do not combine
+  # associatively. The pair that is monoidal stays available.
+  def test_the_aggregates_offered_are_exactly_the_monoids
+    assert_equal %i[count sum min max], Sodalite::DB::MONOIDS.keys
+    refute_respond_to SCHEMA[:users].group(:city), :avg
+  end
+
   def test_a_projected_relation_has_no_row_type
     relation = Sodalite::DB.memory(SCHEMA, users: [{ id: 1, name: 'mina', city: 'tokyo' }])
                            .select(SCHEMA[:users].select(:name))

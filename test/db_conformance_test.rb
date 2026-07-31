@@ -50,7 +50,32 @@ class DBConformanceTest < Minitest::Test
       s[:posts].where(:title, 'hello').follow(:author).where(:city, 'tokyo').select(:name)
     },
     'image collapses duplicates' => ->(s) { s[:posts].select(:title) },
-    'empty subobject' => ->(s) { s[:users].where(:city, 'kyoto') }
+    'empty subobject' => ->(s) { s[:users].where(:city, 'kyoto') },
+
+    # Phase two: a fold along the fibers of the grouping map.
+    'group and count' => ->(s) { s[:users].group(:city).count(:people) },
+    'group and max' => ->(s) { s[:users].group(:city).max(:id, as: :newest) },
+    'group and sum' => ->(s) { s[:users].group(:city).sum(:id, as: :total) },
+    'group and min' => ->(s) { s[:users].group(:city).min(:id, as: :oldest) },
+    'several folds at once' => lambda { |s|
+      s[:users].group(:city).count(:people).min(:id, as: :oldest).max(:id, as: :newest)
+    },
+    'fold after composition' => ->(s) { s[:posts].follow(:author).group(:city).count(:people) },
+    'fold after a subobject' => ->(s) { s[:users].where(:city, 'tokyo').group(:city).count(:people) },
+    'a fold with an empty carrier' => ->(s) { s[:users].where(:city, 'kyoto').group(:city).count(:people) },
+
+    # Phase three: a total order, and a window on it.
+    'order' => ->(s) { s[:users].order(:name) },
+    'order descending' => ->(s) { s[:users].order(:name, :desc) },
+    'order then window' => ->(s) { s[:users].order(:name).limit(2) },
+    'order then offset window' => ->(s) { s[:users].order(:name).limit(2).offset(1) },
+    'order by two fields' => ->(s) { s[:users].order(:city).order(:name, :desc) },
+    'order a projection' => ->(s) { s[:users].select(:name, :id).order(:name) },
+    'order a fold by its aggregate' => ->(s) { s[:users].group(:city).count(:people).order(:people, :desc) },
+    'a window over a fold' => ->(s) { s[:users].group(:city).count(:people).order(:people, :desc).limit(1) },
+    'the whole pipeline' => lambda { |s|
+      s[:posts].where(:title, 'hello').follow(:author).group(:city).count(:people).order(:people, :desc)
+    }
   }.freeze
 
   def setup
@@ -88,6 +113,34 @@ class DBConformanceTest < Minitest::Test
     assert_equal 1, users.size
     assert_equal 'tokyo', users.first.city
     assert_predicate users.first, :frozen?
+  end
+
+  # Ordering is not part of the algebra, so it changes the result *type*: an
+  # ordered query yields a sequence, and sequences compare in order.
+  def test_an_ordered_query_yields_a_sequence_and_an_unordered_one_yields_a_set
+    assert_instance_of Sodalite::DB::Relation, @memory.select(SCHEMA[:users])
+    assert_instance_of Sodalite::DB::Listing, @memory.select(SCHEMA[:users].order(:name))
+    assert_equal(%w[ghost mina rin], @sql.select(SCHEMA[:users].order(:name)).map { |row| row[:name] })
+  end
+
+  # The image has to be taken before the fold, or a join's multiplicities get
+  # counted instead of the elements of the image. This is the one the conformance
+  # suite caught: nothing about the naive SQL looked wrong.
+  def test_a_fold_after_a_composition_counts_the_image_not_the_join
+    query = SCHEMA[:posts].follow(:author).group(:city).count(:people)
+
+    assert_equal([{ city: 'osaka', people: 1 }, { city: 'tokyo', people: 1 }],
+                 @memory.select(query).rows.sort_by { |row| row[:city] })
+    assert_equal @memory.select(query), @sql.select(query)
+    assert_includes Sodalite::DB::SQL.compile(query).first, 'FROM (SELECT DISTINCT'
+  end
+
+  def test_a_fold_compiles_to_group_by_and_an_order_to_a_total_order
+    sql, = Sodalite::DB::SQL.compile(SCHEMA[:users].group(:city).count(:people).order(:people, :desc).limit(2))
+
+    assert_equal 'SELECT g.city, COUNT(*) AS people FROM ' \
+                 '(SELECT DISTINCT t0.id, t0.name, t0.city FROM users t0) g ' \
+                 'GROUP BY g.city ORDER BY people DESC, city ASC LIMIT 2', sql
   end
 
   # Rollback is not a feature either model implements for the caller's benefit —
