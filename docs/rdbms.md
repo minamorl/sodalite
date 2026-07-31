@@ -257,10 +257,10 @@ not reach:
    and restricted to the aggregates that are monoids, which is why `avg` is not offered.
 4. **Isolation levels.** No algebra makes `REPEATABLE READ` true. The transaction handler is sound
    *within* an isolation level, which is a parameter and not a theorem. Say so where it is chosen.
-5. **`Σ_F ⊣ Δ_F ⊣ Π_F`.** Spivak's adjoint triple is about *migration between schemas*, not querying
-   one. Only `Δ` (substitution along a schema map) is in scope here. `Σ` and `Π` would make a schema
-   change carry a provable data migration — genuinely interesting, and a separate project. Naming it is
-   not promising it.
+5. **`Σ_F ⊣ Δ_F ⊣ Π_F` in full.** The adjoint triple is about migration between schemas, and the
+   useful half of it is now built (see `docs/migrations.md`): a step is a functor and both directions
+   are derived, so *reversibility is computed*. What is still absent is the general `Σ`/`Π` — merging
+   and splitting tables — which needs the adjoints proper rather than the six step shapes offered.
 
 ## 8. The seam this closes
 

@@ -115,6 +115,32 @@ module Sodalite
         "CREATE TABLE #{table.name} (#{columns.join(', ')})"
       end
 
+      # DDL is derived from the step, not typed out beside it. A step can need
+      # more than one statement, so this always answers with a list of
+      # `[sql, binds]` — which is what `add_attribute` needs, because `ADD
+      # COLUMN` leaves existing rows NULL while the induced map on instances says
+      # the column is the constant default. Backfilling is not a nicety; without
+      # it the two models disagree, and the conformance suite says so.
+      def ddl(step, schema)
+        table, *rest = step.args
+        case step.kind
+        when :create_table then [[create_table_statement(schema.table(table)), []]]
+        when :drop_table then [["DROP TABLE #{table}", []]]
+        when :add_attribute then add_column(schema, table, rest[0], step.default)
+        when :drop_attribute then [["ALTER TABLE #{table} DROP COLUMN #{rest[0]}", []]]
+        when :rename_attribute then [["ALTER TABLE #{table} RENAME COLUMN #{rest[0]} TO #{rest[1]}", []]]
+        when :rename_table then [["ALTER TABLE #{table} RENAME TO #{rest[0]}", []]]
+        end
+      end
+
+      def add_column(schema, table, field, default)
+        definition = schema.table(table)
+        type = definition.foreign_keys.key?(field) ? 'INTEGER' : sql_type(definition.attributes[field])
+        statements = [["ALTER TABLE #{table} ADD COLUMN #{field} #{type}", []]]
+        statements << ["UPDATE #{table} SET #{field} = ?", [default]] unless default.nil?
+        statements
+      end
+
       def sql_type(spec)
         case spec.to_s.delete_suffix('?').to_sym
         when :integer then 'INTEGER'
@@ -132,8 +158,9 @@ module Sodalite
       attr_reader :schema
 
       def initialize(schema, connection)
-        @schema = schema
+        @schema = schema.is_a?(History) ? schema.schema : schema
         @connection = connection
+        @history = schema if schema.is_a?(History)
       end
 
       def create_tables!
@@ -167,6 +194,45 @@ module Sodalite
           @connection.execute("DELETE FROM #{table.name} WHERE #{table.key} = ?", [row[table.key]])
         end
         doomed.size
+      end
+
+      # --- migration ----------------------------------------------------------
+      LEDGER = 'sodalite_migrations'
+
+      # The ledger records the fingerprint of each applied step, so a migration
+      # edited after the fact is caught rather than silently re-meaning something.
+      def migrate!(history)
+        ensure_ledger!
+        applied = self.applied
+        history.steps.each_with_index do |step, version|
+          next check_fingerprint!(step, version, applied) if applied.key?(version)
+
+          @schema = history.schema_at(version + 1)
+          SQL.ddl(step, @schema).each { |sql, binds| @connection.execute(sql, binds) }
+          @connection.execute("INSERT INTO #{LEDGER} (version, step, fingerprint) VALUES (?, ?, ?)",
+                              [version, step.to_s, step.fingerprint])
+        end
+        self
+      end
+
+      def applied
+        ensure_ledger!
+        @connection.execute("SELECT version, fingerprint FROM #{LEDGER}", [])
+                   .to_h { |version, fingerprint| [version, fingerprint] }
+      end
+
+      def ensure_ledger!
+        @connection.execute(
+          "CREATE TABLE IF NOT EXISTS #{LEDGER} " \
+          '(version INTEGER PRIMARY KEY, step TEXT, fingerprint TEXT)', []
+        )
+      end
+
+      def check_fingerprint!(step, version, applied)
+        return if applied[version] == step.fingerprint
+
+        raise MigrationError,
+              "migration #{version} was applied as #{applied[version]} but now reads #{step.fingerprint}"
       end
 
       # Same shape as the memory model's: the caller never asks for a rollback,

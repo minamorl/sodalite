@@ -1,7 +1,12 @@
 # frozen_string_literal: true
 
+# `sodalite/db` is an optional layer on the core, and says so by requiring it.
+require_relative '../sodalite'
+
 require_relative 'db/aggregate'
 require_relative 'db/schema'
+require_relative 'db/migration'
+require_relative 'db/carries'
 require_relative 'db/query'
 require_relative 'db/relation'
 require_relative 'db/memory'
@@ -43,6 +48,12 @@ module Sodalite
 
     def fk(target)
       FK.new(target: target)
+    end
+
+    # The ordered composite of schema morphisms. Its final schema is a value, so
+    # nothing has to be typed twice: `history.schema` is what the models use.
+    def history(*steps)
+      History.new(steps)
     end
 
     def memory(schema, seed = {})

@@ -159,6 +159,39 @@ failure still carries which named task produced it. [The design note](docs/rdbms
 category theory, and section 7 names the five places it does not reach — `NULL`, ordering, aggregation,
 isolation levels, and schema migration.
 
+## History and storage
+
+A migration step is a functor, so **reversibility is computed rather than promised**:
+
+```ruby
+HISTORY = Sodalite::DB.history(
+  [:create_table,     :users, { id: :integer, name: :string }],
+  [:add_attribute,    :users, :city, :string, 'unknown'],
+  [:rename_attribute, :users, :city, :town]
+)
+
+HISTORY.schema              # the composite — nothing is declared twice
+HISTORY.reversible_to?(0)   # => true; a drop_attribute would make it false
+```
+
+`rename` is an isomorphism, `add_attribute` is injective (the column is the constant default, so the
+original projects back out), `drop_attribute` is a projection and forgets. That answer arrives before
+a statement runs. Both models carry the history and the conformance suite covers "migrate, then
+query".
+
+Object storage gets the same treatment. A bucket is a partial function `Key ⇀ Object` whose keys form
+a poset under the prefix order, so `list(prefix)` is that order's principal filter — and there are no
+transactions, which the design states rather than hides:
+
+```ruby
+Sodalite::Store.saga(:publish, upload >> index >> announce)
+```
+
+A write records its inverse; an `Err` replays the inverses backwards. It is lax — compensation cannot
+unread — and there is a test asserting that rather than a footnote mentioning it. `Store.memory` and
+`Store.filesystem` are conformance-checked against each other; `Store.s3` is the same shape over a
+four-method port. [The design note](docs/migrations.md) has the rest.
+
 ## Streaming
 
 The sieve reads NDJSON and SSE one record at a time; this writes them the same way, validating each
@@ -188,6 +221,7 @@ published yet, so development takes all three siblings from git.
 | Guide | What it covers |
 | --- | --- |
 | [The design](docs/design.md) | Why each layer is there, the two vocabularies, and what is deliberately not built |
+| [History and storage](docs/migrations.md) | Migrations as functors with computed reversibility, and object storage as a partial function with sagas |
 | [The RDBMS boundary](docs/rdbms.md) | The database as a theory with models: schemas as categories, queries as arrows, transactions as combinators |
 | [`examples/service.rb`](examples/service.rb) | A complete service, run twice — against a fixed world in process, and on Puma |
 

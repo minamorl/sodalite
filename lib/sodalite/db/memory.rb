@@ -9,10 +9,13 @@ module Sodalite
     # of the same theory the SQL model is a model of, which is what makes the
     # conformance check between them mean something.
     class Memory
+      include Carries
+
       attr_reader :schema
 
       def initialize(schema, seed = {})
-        @schema = schema
+        @applied = schema.is_a?(History) ? (0...schema.size).to_a : []
+        @schema = schema.is_a?(History) ? schema.schema : schema
         @store = schema.names.to_h { |name| [name, []] }
         seed.each { |table, rows| rows.each { |row| insert(table, row) } }
         @lock = Mutex.new
