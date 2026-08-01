@@ -150,10 +150,16 @@ SELECT DISTINCT t1.name FROM posts t0 JOIN users t1 ON t0.author = t1.id
 WHERE t0.title = ? AND t1.city = ?
 ```
 
-`DB.memory` (an instance functor into Set) and `DB.sql` (arrows compiled to SQL) are two models of one
-theory, not a stub and the real thing — and `test/db_conformance_test.rb` checks that they agree on
-the regular fragment. That is the upgrade: the fixed world no longer returns what a test author decided,
-it computes the same query somewhere cheaper.
+Three models, not a stub and the real thing: `DB.memory` (an instance functor into Set), `DB.sql`
+(arrows compiled to SQL text, no driver anywhere near it), and `DB.sequel` (the same arrows lowered
+onto Sequel's expression API, which knows dialects and quoting). `test/db_conformance_test.rb` drives
+fifty arrow shapes through all three and asserts they agree. That is the upgrade: the fixed world no
+longer returns what a test author decided, it computes the same query somewhere cheaper — and a bug
+would have to occur in three independent lowerings, identically, to survive.
+
+Sequel is a **backend** here, not a second query language: the arrows are the theory, and dialects,
+quoting, and pooling are what Sequel is for. It stays out of the runtime dependencies the same way no
+driver is in them — `DB.sequel` takes a database someone else built.
 
 A transaction is a combinator whose handler runs the subtree, and rollback is what `Err` means to it:
 

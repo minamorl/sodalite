@@ -5,6 +5,7 @@ require 'sodalite/db'
 
 begin
   require 'sqlite3'
+  require 'sequel'
   SQLITE = true
 rescue LoadError
   SQLITE = false
@@ -12,10 +13,16 @@ end
 
 # The claim the whole design rests on, made runnable.
 #
-# `Memory` and `Sql` are not a stub and the real thing. They are two models of
-# one finitely presented theory, and on the regular fragment they agree. A
-# framework that says "the world is a parameter" should be able to check that its
-# two worlds are the same world; this is that check.
+# `Memory`, `Sql`, and `Sequel` are not a stub and two real things. They are
+# three models of one finitely presented theory, and they agree across all three
+# phases. A framework that says "the world is a parameter" should be able to
+# check that its worlds are the same world; this is that check.
+#
+# `Memory` evaluates the composites, subobjects, and images directly in Set.
+# `Sql` compiles arrows to SQL text with no driver anywhere near it. `Sequel`
+# lowers the same arrows onto a dataset algebra that knows dialects and quoting.
+# Three independent lowerings of one meaning — a bug would have to occur in all
+# three, identically, to survive.
 class DBConformanceTest < Minitest::Test
   SCHEMA = Sodalite::DB.schema(
     users: { id: :integer, name: :string, city: :string, nickname: :string? },
@@ -121,15 +128,19 @@ class DBConformanceTest < Minitest::Test
 
     @memory = Sodalite::DB.memory(SCHEMA, SEED)
     @sql = Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables!
-    SEED.each { |table, rows| rows.each { |row| @sql.insert(table, row) } }
+    @sequel = Sodalite::DB.sequel(SCHEMA, Sequel.sqlite).create_tables!
+    SEED.each do |table, rows|
+      rows.each { |row| [@sql, @sequel].each { |model| model.insert(table, row) } }
+    end
   end
 
   QUERIES.each do |label, build|
-    define_method("test_the_two_models_agree_on_#{label.tr(' ', '_')}") do
+    define_method("test_the_models_agree_on_#{label.tr(' ', '_')}") do
       query = build.call(SCHEMA)
+      expected = @memory.select(query)
 
-      assert_equal @memory.select(query), @sql.select(query),
-                   "#{query}\n#{Sodalite::DB::SQL.compile(query).first}"
+      assert_equal expected, @sql.select(query), "sql: #{query}\n#{Sodalite::DB::SQL.compile(query).first}"
+      assert_equal expected, @sequel.select(query), "sequel: #{query}"
     end
   end
 
@@ -191,11 +202,11 @@ class DBConformanceTest < Minitest::Test
     assert_includes having, ' HAVING people > ?'
   end
 
-  # Rollback is not a feature either model implements for the caller's benefit —
-  # it is what `Err` means to a scope. Both models mean the same thing by it, one
-  # with a snapshot and one with a real `ROLLBACK`.
-  def test_both_models_roll_back_a_failed_scope_the_same_way
-    [@memory, @sql].each do |model|
+  # Rollback is not a feature a model implements for the caller's benefit — it is
+  # what `Err` means to a scope. All three mean the same thing by it: a snapshot,
+  # a literal `ROLLBACK`, and `Sequel::Rollback`.
+  def test_every_model_rolls_back_a_failed_scope_the_same_way
+    [@memory, @sql, @sequel].each do |model|
       workflow = Sodalite::DB.atomically(
         :write,
         Berylx::Task[:insert] { |_lay, io| io.perform(Sodalite::DB::INSERT, [:posts, doomed_post]) } >>

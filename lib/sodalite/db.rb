@@ -15,6 +15,9 @@ require_relative 'db/evaluates'
 require_relative 'db/memory'
 require_relative 'db/sql'
 require_relative 'db/ddl'
+require_relative 'db/sequel_arrows'
+require_relative 'db/sequel_ddl'
+require_relative 'db/sequel'
 
 module Sodalite
   # The database boundary as a theory with models, rather than a bag of lambdas.
@@ -66,6 +69,13 @@ module Sodalite
 
     def sql(schema, connection)
       Sql.new(schema, connection)
+    end
+
+    # A third model, over a `Sequel::Database` someone else built. Sequel is a
+    # backend — dialects, quoting, pooling — not a second query language, so
+    # arrows are lowered onto its expression API and mean exactly what they meant.
+    def sequel(schema, database)
+      Sequel.new(schema, database)
     end
 
     # A transaction reads as a combinator and is a Task underneath.

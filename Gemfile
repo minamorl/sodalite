@@ -19,3 +19,8 @@ gem 'zeolite', git: 'https://github.com/minamorl/zeolite.git', branch: 'main'
 # The library itself depends on no driver: `Sodalite::DB.sql` takes anything
 # answering `execute(sql, binds) -> rows`.
 gem 'sqlite3', '~> 2.0', require: false
+
+# The third model. Sequel is a *backend* here — dialects, identifier quoting,
+# pooling — not a second query language, and it stays out of the gemspec for the
+# same reason no driver is in it: `DB.sequel` takes a database someone else built.
+gem 'sequel', '~> 5.0', require: false

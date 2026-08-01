@@ -5,6 +5,7 @@ require 'sodalite/db'
 
 begin
   require 'sqlite3'
+  require 'sequel'
   MIGRATION_SQLITE = true
 rescue LoadError
   MIGRATION_SQLITE = false
@@ -116,24 +117,32 @@ class DBMigrationConformanceTest < Minitest::Test
   def setup
     skip 'sqlite3 unavailable' unless MIGRATION_SQLITE
 
+    first_step = Sodalite::DB.history(*HISTORY.steps.first(1))
     @memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(HISTORY.spec_at(1)))
-    @sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(HISTORY.spec_at(0)), Adapter.new)
-    @sql.migrate!(Sodalite::DB.history(*HISTORY.steps.first(1)))
-    [@memory, @sql].each { |model| model.insert(:users, { id: 1, name: 'mina' }) }
+    @sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(HISTORY.spec_at(0)), Adapter.new).migrate!(first_step)
+    @sequel = Sodalite::DB.sequel(Sodalite::DB::Schema.new(HISTORY.spec_at(0)), Sequel.sqlite)
+                          .migrate!(first_step)
+    models.each { |model| model.insert(:users, { id: 1, name: 'mina' }) }
+  end
+
+  def models
+    [@memory, @sql, @sequel]
   end
 
   # `ALTER TABLE ADD COLUMN` leaves existing rows NULL, while the induced map on
   # instances says the column is the constant default. Without the backfill the
   # two models disagree — which is how this was found.
-  def test_both_models_carry_existing_rows_through_the_same_migration
-    [@memory, @sql].each { |model| model.migrate!(HISTORY) }
+  def test_every_model_carries_existing_rows_through_the_same_migration
+    models.each { |model| model.migrate!(HISTORY) }
+    expected = @memory.select(HISTORY.schema[:users])
 
-    assert_equal @memory.select(HISTORY.schema[:users]), @sql.select(HISTORY.schema[:users])
-    assert_equal 'unknown', @memory.select(HISTORY.schema[:users]).rows.first[:town]
+    assert_equal expected, @sql.select(HISTORY.schema[:users])
+    assert_equal expected, @sequel.select(HISTORY.schema[:users])
+    assert_equal 'unknown', expected.rows.first[:town]
   end
 
   def test_queries_agree_after_migrating
-    [@memory, @sql].each do |model|
+    models.each do |model|
       model.migrate!(HISTORY)
       model.insert(:posts, { id: 10, title: 'hi', author: 1 })
     end
@@ -141,12 +150,14 @@ class DBMigrationConformanceTest < Minitest::Test
     query = HISTORY.schema[:posts].follow(:author).group(:town).count(:people)
 
     assert_equal @memory.select(query), @sql.select(query)
+    assert_equal @memory.select(query), @sequel.select(query)
   end
 
   def test_migrating_twice_applies_nothing_the_second_time
-    2.times { [@memory, @sql].each { |model| model.migrate!(HISTORY) } }
+    2.times { models.each { |model| model.migrate!(HISTORY) } }
 
     assert_equal [0, 1, 2, 3], @sql.applied.keys.sort
+    assert_equal [0, 1, 2, 3], @sequel.applied.keys.sort
     assert_equal 1, @memory.rows(:users).size
   end
 
@@ -164,14 +175,35 @@ class DBMigrationConformanceTest < Minitest::Test
     assert_match(/was applied as/, error.message)
   end
 
-  # Both models carry the coproduct the same way: one disjoint union of Hashes,
-  # one INSERT ... SELECT per injection.
-  def test_both_models_carry_the_coproduct_identically
+  # What the Sequel backend actually buys, measured rather than assumed. The
+  # hand-written model interpolates identifiers bare and spells an offset the way
+  # SQLite does; Sequel quotes and knows the dialect.
+  def test_the_sequel_backend_quotes_identifiers_the_hand_written_one_does_not
+    reserved = Sodalite::DB.schema(order: { id: :integer, select: :string })
+    sequel = Sodalite::DB.sequel(reserved, Sequel.sqlite).create_tables!
+    sequel.insert(:order, { id: 1, select: 'x' })
+
+    assert_equal [{ id: 1, select: 'x' }], sequel.select(reserved[:order].where(:select, 'x')).rows
+    assert_includes Sodalite::DB::SQL.compile(reserved[:order].where(:select, 'x')).first, 'FROM order t0'
+  end
+
+  def test_a_reserved_table_name_breaks_the_hand_written_backend
+    reserved = Sodalite::DB.schema(order: { id: :integer, select: :string })
+    sql = Sodalite::DB.sql(reserved, Adapter.new)
+
+    assert_raises(SQLite3::SQLException) { sql.create_tables! }
+  end
+
+  # Every model carries the coproduct the same way: one disjoint union of
+  # Hashes, one INSERT ... SELECT per injection, one dataset insert per row.
+  def test_every_model_carries_the_coproduct_identically
     history = DBHistoryTest::ANIMALS
+    first_two = Sodalite::DB.history(*history.steps.first(2))
     memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(history.spec_at(2)))
-    sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(history.spec_at(0)), Adapter.new)
-    sql.migrate!(Sodalite::DB.history(*history.steps.first(2)))
-    [memory, sql].each do |model|
+    sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(history.spec_at(0)), Adapter.new).migrate!(first_two)
+    sequel = Sodalite::DB.sequel(Sodalite::DB::Schema.new(history.spec_at(0)), Sequel.sqlite)
+                         .migrate!(first_two)
+    [memory, sql, sequel].each do |model|
       model.insert(:cats, { id: 1, name: 'mi' })
       model.insert(:dogs, { id: 2, name: 'pochi' })
       model.migrate!(history)
