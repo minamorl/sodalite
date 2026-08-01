@@ -82,31 +82,43 @@ module Sodalite
       end
     end
 
-    # A saga scope really is a handler-map swap — but the map has to be *built*
-    # for the journal, not merged over an existing one. berylx warns about this
-    # and it is easy to get wrong: the combinator handlers inside a finished map
-    # close over the map they were constructed with, so a merged copy runs its
-    # subtrees on the original bindings and the journal never sees a thing.
+    # A store, as something an app can be given alongside other capabilities.
     #
-    # So the scope rebuilds the map from the same inputs, with the journal in the
-    # model's place. Nesting works because the rebuild is what recurses.
-    def handlers(model, effects = {}, fixed: true, **options)
-      store_effects = effects.merge(
-        PUT => ->(payload) { model.put(payload[0], payload[1], payload[2] || {}) },
-        GET => ->(key) { model.get(key) },
-        DELETE => ->(key) { model.delete(key) },
-        LIST => ->(prefix) { model.list(prefix.to_s) },
-        SAGA => ->(payload) { run_saga(model, effects, payload, fixed: fixed, **options) }
-      )
-      fixed ? Effects.fixed(store_effects, **options) : Effects.real(store_effects, **options)
+    # A saga scope *does* need a swap: the subtree has to run against a
+    # journalled store so the inverse of each write is recorded. Swapping is what
+    # `rebuild` is for, and it re-derives the whole map rather than merging over
+    # a finished one — a merged copy runs its subtrees on the original bindings,
+    # the journal sees nothing, and the compensation silently does nothing.
+    Capability = Data.define(:model) do
+      def effects(rebuild)
+        {
+          PUT => ->(payload) { model.put(payload[0], payload[1], payload[2] || {}) },
+          GET => ->(key) { model.get(key) },
+          DELETE => ->(key) { model.delete(key) },
+          LIST => ->(prefix) { model.list(prefix.to_s) },
+          SAGA => ->(payload) { run_saga(rebuild, payload) }
+        }
+      end
+
+      private
+
+      def run_saga(rebuild, payload)
+        node, focus = payload
+        journal = Journal.new(model)
+        scoped = rebuild.call(self => Capability.new(model: journal))
+        result = Berylx::EffectTree.run(node, focus, handlers: scoped)
+        journal.compensate if result.is_a?(Berylx::Err)
+        result
+      end
     end
 
-    def run_saga(model, effects, payload, **)
-      node, focus = payload
-      journal = Journal.new(model)
-      result = Berylx::EffectTree.run(node, focus, handlers: handlers(journal, effects, **))
-      journal.compensate if result.is_a?(Berylx::Err)
-      result
+    def capability(model)
+      Capability.new(model: model)
+    end
+
+    def handlers(model, effects = {}, fixed: true, **)
+      Effects.assemble(capabilities: [capability(model)], effects: effects,
+                       world: fixed ? :fixed : :real, **)
     end
   end
 end

@@ -62,6 +62,28 @@ module Sodalite
       }
     end
 
+    # Assemble one handler map out of several capabilities.
+    #
+    # A real service reaches a database *and* an object store *and* whatever
+    # verbs it invented, and each of those used to build a whole map of its own,
+    # so you could have exactly one. This is the composition they were missing.
+    #
+    # The knot is scopes. A transaction or a saga runs a subtree under a map that
+    # is not quite this one, and berylx warns why a merged copy will not do: the
+    # combinator handlers inside a finished map close over the map they were
+    # constructed with. So every capability is handed `rebuild`, which re-derives
+    # the *whole* map with any capability swapped for another — which is exactly
+    # what a saga needs (swap the store for a journalled store) and harmless for
+    # a transaction (swap nothing).
+    def assemble(capabilities: [], effects: {}, world: :fixed, **options)
+      rebuild = lambda do |swaps|
+        assemble(capabilities: capabilities.map { |capability| swaps.fetch(capability, capability) },
+                 effects: effects, world: world, **options)
+      end
+      contributed = capabilities.reduce(effects) { |all, capability| all.merge(capability.effects(rebuild)) }
+      world == :real ? real(contributed, **options) : fixed(contributed, **options)
+    end
+
     def build(base, effects)
       Berylx::EffectTree.real_handlers(base.merge(check(effects)))
     end

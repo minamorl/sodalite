@@ -119,6 +119,55 @@ dead-ends backtracks rather than shadowing a parameter route that would have mat
 split before they are percent-decoded, so `%2F` is data inside one segment and never invents a path
 separator.
 
+## Assembling a service
+
+A service reaches a database *and* an object store *and* whatever verbs it invented. All four go in
+one place:
+
+```ruby
+app = Sodalite::App.build(
+  routes:       ROUTES,
+  capabilities: [Sodalite::DB.capability(db), Sodalite::Store.capability(objects)],
+  effects:      { send_mail: Mailer.method(:deliver) },
+  errors:       { not_found: 404, forbidden: 403 },
+  world:        :real
+)
+```
+
+Swap `world:` and the capabilities, and the same routes run against fixed values with no database, no
+clock, and no socket. Scopes survive the swap: a saga rebuilds the map with the store journalled and
+still reaches the database; a transaction rolls the database back and leaves the store alone, because
+an object store cannot join a transaction and this does not pretend it can.
+
+Liveness and readiness are two questions, so they are two routes. Liveness is framework-level;
+readiness is not, because only the service knows what it needs before it should be sent traffic:
+
+```ruby
+Sodalite.health
+Sodalite.health(path: '/ready', checks: {
+  database: ->(io) { io.perform(Sodalite::DB::SELECT, HEARTBEAT) },
+  objects:  ->(io) { io.perform(Sodalite::Store::LIST, '') }
+})
+```
+
+A check that returns falsy or raises is down, and any down check makes the whole answer 503.
+
+## The document is a fold over the routes
+
+Every route already carries its full declared shape as data, so the published contract is derived
+rather than maintained:
+
+```ruby
+Sodalite::OpenAPI.document(app, title: 'users', version: '1.0')
+```
+
+Path templates are rewritten to OpenAPI's spelling, enums publish their closed set, `?` becomes
+`nullable` and drops out of `required`, and the statuses the framework itself can produce — 400, 404,
+405, and 415/413 where a body is declared — are published too, with the error shape that is actually
+sent. It will not invent: a refinement's predicate is a Ruby block with no JSON Schema, so it
+publishes its own label in `description` rather than claiming a wider contract than the service
+accepts.
+
 ## The database is a theory with models
 
 `Sodalite::DB` replaces "the handler map is a bag of lambdas" with a fixed relational signature, so a
@@ -236,11 +285,14 @@ published yet, so development takes all three siblings from git.
 | [The design](docs/design.md) | Why each layer is there, the two vocabularies, and what is deliberately not built |
 | [History and storage](docs/migrations.md) | Migrations as functors with computed reversibility, and object storage as a partial function with sagas |
 | [The RDBMS boundary](docs/rdbms.md) | The database as a theory with models: schemas as categories, queries as arrows, transactions as combinators |
-| [`examples/service.rb`](examples/service.rb) | A complete service, run twice — against a fixed world in process, and on Puma |
+| [`examples/service/`](examples/service) | A complete service: routes, a database, an object store, a saga, health and readiness, `config.ru`, and the OpenAPI document |
+| [`examples/minimal.rb`](examples/minimal.rb) | The smallest thing that runs, twice — against a fixed world in process, and on Puma |
 
 ```sh
-ruby -Ilib examples/service.rb          # deterministic, no server
-ruby -Ilib examples/service.rb serve    # puma on 127.0.0.1:9292
+ruby -Ilib examples/service/app.rb          # the whole service, against a fixed world
+ruby -Ilib examples/service/app.rb openapi  # its published document, from the routes
+ruby -Ilib examples/service/boot.rb         # the same service on puma
+rackup examples/service/config.ru           # or any Rack server
 ```
 
 ## Why "sodalite"

@@ -13,6 +13,7 @@ require_relative 'sodalite/route'
 require_relative 'sodalite/router'
 require_relative 'sodalite/render'
 require_relative 'sodalite/app'
+require_relative 'sodalite/health'
 
 # Sodalite is a web framework where the request is a value, the world is a
 # parameter, and nothing untyped gets in or out.

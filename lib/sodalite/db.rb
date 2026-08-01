@@ -92,28 +92,33 @@ module Sodalite
       end
     end
 
-    # Wire a model into a handler map.
+    # A model, as something an app can be given alongside other capabilities.
     #
-    # The transaction handler has to run subtrees under the finished map, which
-    # is not known until the map exists — the same knot berylx ties with
-    # `real_handlers(effects, subtree)`. Boot-time wiring, done once, then left
-    # alone.
-    def handlers(model, effects = {}, fixed: true, **)
-      map = {}
-      base = effects.merge(effects_for(model, map))
-      map.replace(fixed ? Effects.fixed(base, **) : Effects.real(base, **))
+    # A transaction does not need anything swapped — the model is stateful, and
+    # its snapshot or its `BEGIN` is what the scope is — so it rebuilds the same
+    # map and runs the subtree under it.
+    Capability = Data.define(:model) do
+      def effects(rebuild)
+        {
+          SELECT => ->(query) { model.select(query) },
+          INSERT => ->(payload) { model.insert(payload[0], payload[1]) },
+          DELETE => ->(query) { model.delete(query) },
+          ATOMICALLY => lambda { |payload|
+            node, focus = payload
+            model.atomically { Berylx::EffectTree.run(node, focus, handlers: rebuild.call({})) }
+          }
+        }
+      end
     end
 
-    def effects_for(model, map)
-      {
-        SELECT => ->(query) { model.select(query) },
-        INSERT => ->(payload) { model.insert(payload[0], payload[1]) },
-        DELETE => ->(query) { model.delete(query) },
-        ATOMICALLY => lambda { |payload|
-          node, focus = payload
-          model.atomically { Berylx::EffectTree.run(node, focus, handlers: map) }
-        }
-      }
+    def capability(model)
+      Capability.new(model: model)
+    end
+
+    # The one-capability shorthand. `Effects.assemble` is the general form.
+    def handlers(model, effects = {}, fixed: true, **)
+      Effects.assemble(capabilities: [capability(model)], effects: effects,
+                       world: fixed ? :fixed : :real, **)
     end
   end
 end
