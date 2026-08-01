@@ -131,7 +131,14 @@ SCHEMA = Sodalite::DB.schema(
 )
 
 in_tokyo = SCHEMA[:posts].where(:title, 'hello').follow(:author).where(:city, 'tokyo').select(:name)
+
+busy = SCHEMA[:users].group(:city).count(:people).having(:people, :gt, 1).order(:people, :desc)
+adults = SCHEMA[:users].where(:age, :gte, 18).union(SCHEMA[:users].where_null(:age))
 ```
+
+`where` takes an order comparison wherever the attribute type carries an order, and a complement
+wherever the type is a plain set — over a nullable column `NOT (x = 3)` is three-valued, so the
+complement is refused there and `where_null` / `where_present` eliminate the `A + 1` explicitly.
 
 A schema is a finitely presented category: tables are objects, foreign keys are morphisms, and an
 instance is a functor into `Set` — so a dangling foreign key is not a bad row, it is a failure to be a

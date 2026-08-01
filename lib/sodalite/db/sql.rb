@@ -14,47 +14,59 @@ module Sodalite
       module_function
 
       def compile(query)
-        aliases = [[query.root, 't0']]
-        joins = []
-        wheres = []
-        binds = []
+        rows, binds = coproduct(query)
+        [query.grouped? ? grouped(query, rows) : "#{rows}#{order_by(query)}#{window(query)}", binds]
+      end
 
-        query.steps.each do |kind, *rest|
-          case kind
-          when :follow then follow(query, aliases, joins, rest)
-          when :where  then where(aliases, wheres, binds, rest)
-          end
+      # Phase one, including the coproduct. SQL's `UNION` deduplicates, so it is
+      # the coproduct followed by image factorization — set union, which is what
+      # a `Relation` means.
+      def coproduct(query)
+        rows, binds = row_source(query)
+        query.unions.each do |other|
+          other_sql, other_binds = compile(other)
+          rows = "#{rows} UNION #{other_sql}"
+          binds.concat(other_binds)
         end
-
-        source = "FROM #{query.root} t0#{joins.join}#{where_clause(wheres)}"
-        [query.grouped? ? grouped(query, aliases, source) : flat(query, aliases, source), binds]
+        [rows, binds]
       end
 
-      def flat(query, aliases, source)
-        "SELECT DISTINCT #{qualified_fields(query, aliases).join(', ')} #{source}" \
-          "#{order_by(query)}#{window(query)}"
+      # The three accumulators a phase-one walk fills travel together, so they
+      # are one value rather than three parameters passed in step.
+      Clauses = Data.define(:aliases, :joins, :wheres, :binds) do
+        def self.for(query) = new(aliases: [[query.root, 't0']], joins: [], wheres: [], binds: [])
+        def alias_now = aliases.last[1]
       end
 
-      # `follow` is composition **followed by image factorization**, so it yields
-      # a set. A SQL `JOIN` yields the pullback, which keeps one row per pair —
-      # so folding straight over the join counts multiplicities of the join
-      # rather than elements of the image, and `posts.follow(:author)` would
-      # report a city twice for an author with two posts.
-      #
-      # The image therefore has to be taken *before* the fold, which is what this
-      # derived table is. For an ungrouped root the DISTINCT is a no-op, so the
-      # same shape is correct either way.
-      #
-      # The two-model conformance suite is what caught this; nothing about the
-      # SQL looked wrong.
-      def grouped(query, aliases, source)
-        image = "SELECT DISTINCT #{qualified_fields(query, aliases).join(', ')} #{source}"
+      def row_source(query)
+        clauses = Clauses.for(query)
+        query.steps.each { |kind, *rest| phase_one(query, kind, rest, clauses) }
+        ["SELECT DISTINCT #{qualified_fields(query, clauses.aliases).join(', ')} " \
+         "FROM #{query.root} t0#{clauses.joins.join}#{where_clause(clauses.wheres)}", clauses.binds]
+      end
+
+      def phase_one(query, kind, rest, clauses)
+        case kind
+        when :follow then follow(query, clauses.aliases, clauses.joins, rest)
+        when :where  then where(clauses.aliases, clauses.wheres, clauses.binds, rest)
+        when :null   then clauses.wheres << "#{clauses.alias_now}.#{rest[0]} IS #{'NOT ' unless rest[1]}NULL"
+        end
+      end
+
+      def grouped(query, image)
         keys = query.grouping.map { |field| "g.#{field}" }
         folds = query.aggregates.map do |aggregate|
           "#{aggregate.monoid.sql.call("g.#{aggregate.field}")} AS #{aggregate.name}"
         end
         "SELECT #{(keys + folds).join(', ')} FROM (#{image}) g GROUP BY #{keys.join(', ')}" \
-          "#{order_by(query)}#{window(query)}"
+          "#{having(query)}#{order_by(query)}#{window(query)}"
+      end
+
+      def having(query)
+        return '' if query.havings.empty?
+
+        clauses = query.havings.map { |name, _value, operator| "#{name} #{COMPARISONS[operator]} ?" }
+        " HAVING #{clauses.join(' AND ')}"
       end
 
       def where_clause(wheres)
@@ -96,8 +108,8 @@ module Sodalite
       end
 
       def where(aliases, wheres, binds, step)
-        field, value = step
-        wheres << "#{aliases.last[1]}.#{field} = ?"
+        field, value, operator = step
+        wheres << "#{aliases.last[1]}.#{field} #{COMPARISONS.fetch(operator)} ?"
         binds << value
       end
 
@@ -113,32 +125,6 @@ module Sodalite
           "#{field} #{type}#{' PRIMARY KEY' if field == table.key}"
         end
         "CREATE TABLE #{table.name} (#{columns.join(', ')})"
-      end
-
-      # DDL is derived from the step, not typed out beside it. A step can need
-      # more than one statement, so this always answers with a list of
-      # `[sql, binds]` — which is what `add_attribute` needs, because `ADD
-      # COLUMN` leaves existing rows NULL while the induced map on instances says
-      # the column is the constant default. Backfilling is not a nicety; without
-      # it the two models disagree, and the conformance suite says so.
-      def ddl(step, schema)
-        table, *rest = step.args
-        case step.kind
-        when :create_table then [[create_table_statement(schema.table(table)), []]]
-        when :drop_table then [["DROP TABLE #{table}", []]]
-        when :add_attribute then add_column(schema, table, rest[0], step.default)
-        when :drop_attribute then [["ALTER TABLE #{table} DROP COLUMN #{rest[0]}", []]]
-        when :rename_attribute then [["ALTER TABLE #{table} RENAME COLUMN #{rest[0]} TO #{rest[1]}", []]]
-        when :rename_table then [["ALTER TABLE #{table} RENAME TO #{rest[0]}", []]]
-        end
-      end
-
-      def add_column(schema, table, field, default)
-        definition = schema.table(table)
-        type = definition.foreign_keys.key?(field) ? 'INTEGER' : sql_type(definition.attributes[field])
-        statements = [["ALTER TABLE #{table} ADD COLUMN #{field} #{type}", []]]
-        statements << ["UPDATE #{table} SET #{field} = ?", [default]] unless default.nil?
-        statements
       end
 
       def sql_type(spec)
@@ -170,6 +156,7 @@ module Sodalite
 
       def select(query)
         sql, binds = SQL.compile(query)
+        binds += query.havings.map { |having| having[1] }
         fields = query.output_fields
         rows = @connection.execute(sql, binds).map { |values| fields.zip(values).to_h }
         return Listing[rows, schema: query.row_schema] if query.ordered?
@@ -208,7 +195,7 @@ module Sodalite
           next check_fingerprint!(step, version, applied) if applied.key?(version)
 
           @schema = history.schema_at(version + 1)
-          SQL.ddl(step, @schema).each { |sql, binds| @connection.execute(sql, binds) }
+          DDL.ddl(step, @schema).each { |sql, binds| @connection.execute(sql, binds) }
           @connection.execute("INSERT INTO #{LEDGER} (version, step, fingerprint) VALUES (?, ?, ?)",
                               [version, step.to_s, step.fingerprint])
         end

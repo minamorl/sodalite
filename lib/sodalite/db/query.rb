@@ -31,12 +31,28 @@ module Sodalite
     # Each phase is optional, their order is fixed, and both models still have to
     # agree on all three — the conformance suite covers the whole pipeline, not
     # just the fragment.
-    Query = Data.define(:schema, :root, :carrier, :steps, :grouping, :aggregates, :orderings,
-                        :limit_rows, :offset_rows) do
+    # Equality is the regular fragment. An order comparison is still an honest
+    # subobject *when the attribute type carries an order*, which is why the
+    # check is on the type rather than on taste. Negation is the one that
+    # genuinely breaks: `NOT (x = 3)` over a nullable column is three-valued, so
+    # it is refused there and allowed where the type is a plain set.
+    COMPARISONS = { eq: '=', not: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' }.freeze
+    ORDERED_TYPES = %i[integer float number time string].freeze
+    NO_OPERAND = ::Object.new.freeze
+
+    Query = Data.define(:schema, :root, :carrier, :steps, :unions, :grouping, :aggregates,
+                        :havings, :orderings, :limit_rows, :offset_rows) do
+      include QueryChecks
+      include QueryPhases
+
       def self.start(schema, root)
-        new(schema: schema, root: root, carrier: root, steps: [].freeze,
-            grouping: nil, aggregates: [].freeze, orderings: [].freeze,
+        new(schema: schema, root: root, carrier: root, steps: [].freeze, unions: [].freeze,
+            grouping: nil, aggregates: [].freeze, havings: [].freeze, orderings: [].freeze,
             limit_rows: nil, offset_rows: nil)
+      end
+
+      def united?
+        !unions.empty?
       end
 
       def grouped?
@@ -52,90 +68,63 @@ module Sodalite
       # time, not on the request that first runs the query.
       def follow(fk)
         check_fragment_open!(:follow)
+        check_not_united!(:follow)
         target = schema.target_of(carrier, fk)
         with(carrier: target, steps: (steps + [[:follow, fk.to_sym, target]]).freeze)
       end
 
-      # A subobject of the current carrier. Equality only: `=` and `∧` and `∃`
-      # are the regular fragment, and `NOT` is where SQL stops being a category
-      # and becomes three-valued logic.
-      def where(field, value)
+      # A subobject of the current carrier.
+      #
+      #   where(:city, 'tokyo')        equality — the regular fragment
+      #   where(:age, :gte, 18)        an order comparison, if the type is ordered
+      #   where(:city, :not, 'tokyo')  a complement, if the type is not nullable
+      #
+      # Comparing to `nil` is refused in every form. A nullable column is a map
+      # into `A + 1`, and eliminating the `+ 1` is `where_null` / `where_present`
+      # — explicitly, because SQL's silent answer to `x = NULL` is `UNKNOWN`.
+      def where(field, operator_or_value, value = NO_OPERAND)
         check_fragment_open!(:where)
+        check_not_united!(:where)
+        operator, operand = value.equal?(NO_OPERAND) ? [:eq, operator_or_value] : [operator_or_value, value]
         check_field!(field)
-        raise QueryError, "where on #{carrier}.#{field} cannot compare to nil" if value.nil?
+        check_comparison!(field, operator, operand)
+        with(steps: (steps + [[:where, field.to_sym, operand, operator]]).freeze)
+      end
 
-        with(steps: (steps + [[:where, field.to_sym, value]]).freeze)
+      # The explicit elimination of `A + 1`: the fibre over `nothing`, and its
+      # complement. Only on a nullable attribute, because on a plain set they
+      # would be a tautology and a contradiction dressed up as a filter.
+      def where_null(field)
+        check_nullable!(field, :where_null)
+        with(steps: (steps + [[:null, field.to_sym, true]]).freeze)
+      end
+
+      def where_present(field)
+        check_nullable!(field, :where_present)
+        with(steps: (steps + [[:null, field.to_sym, false]]).freeze)
+      end
+
+      # The coproduct. SQL spells it `UNION`, which deduplicates — so it is the
+      # coproduct followed by image factorization, which is exactly set union and
+      # exactly what a `Relation` means.
+      #
+      # Both sides must be subobjects of the same carrier with the same output,
+      # or their coproduct is not a relation over anything. A union closes phase
+      # one: the result is a set built from C's objects rather than one of them,
+      # so C's morphisms no longer apply to it.
+      def union(other)
+        check_unionable!(other)
+        with(unions: (unions + [other]).freeze)
       end
 
       # Image factorization: project, and therefore deduplicate. A projection
       # that kept duplicates would not be the image.
       def select(*fields)
         check_fragment_open!(:select)
+        check_not_united!(:select)
         fields = fields.flatten.map(&:to_sym)
         fields.each { |field| check_field!(field) }
         with(steps: (steps + [[:select, fields.freeze]]).freeze)
-      end
-
-      # --- phase two: a fold along the fibers of a map ------------------------
-
-      # `group(:city)` is the map `carrier -> city`. Its fibers are the groups,
-      # and each aggregate is a monoid folded over one fiber.
-      def group(*fields)
-        fields = fields.flatten.map(&:to_sym)
-        raise QueryError, 'group takes at least one field' if fields.empty?
-
-        fields.each { |field| check_field!(field) }
-        with(grouping: fields.freeze)
-      end
-
-      def count(as)  = aggregate(as, :count, nil)
-      def sum(field, as:) = aggregate(as, :sum, field)
-      def min(field, as:) = aggregate(as, :min, field)
-      def max(field, as:) = aggregate(as, :max, field)
-
-      def aggregate(name, kind, field)
-        raise QueryError, "#{kind} needs a group to fold over" unless grouped?
-
-        check_field!(field) if field
-        with(aggregates: (aggregates + [Aggregate.new(name: name.to_sym, kind: kind, field: field)]).freeze)
-      end
-
-      # --- phase three: a presentation of the result --------------------------
-
-      # An order that is not total is not a function of the set — two rows that
-      # tie may come back either way round, and a paginated client then sees rows
-      # repeat or vanish between pages. So the identifying fields are appended,
-      # and the order this returns is always total.
-      def order(field, direction = :asc)
-        raise QueryError, "unknown direction #{direction.inspect}" unless %i[asc desc].include?(direction)
-
-        check_output_field!(field)
-        with(orderings: (orderings + [Ordering.new(field: field.to_sym, direction: direction)]).freeze)
-      end
-
-      # A window without an order is not a function of the set either; it is
-      # whatever the storage engine felt like. So it is a build error, not a
-      # footgun to discover in production.
-      def limit(rows)
-        raise QueryError, 'limit needs an order — a window on an unordered set is not a value' unless ordered?
-
-        with(limit_rows: Integer(rows))
-      end
-
-      def offset(rows)
-        raise QueryError, 'offset needs an order' unless ordered?
-
-        with(offset_rows: Integer(rows))
-      end
-
-      # The order actually applied: what was asked for, made total.
-      def total_ordering
-        return [] unless ordered?
-
-        tiebreak = (grouped? ? grouping : [schema.table(carrier).key])
-        asked = orderings.map(&:field)
-        orderings + tiebreak.reject { |field| asked.include?(field) }
-                            .map { |field| Ordering.new(field: field, direction: :asc) }
       end
 
       def output_fields
@@ -159,30 +148,6 @@ module Sodalite
 
       def to_s
         "#{root}#{steps.map { |kind, *rest| ".#{kind}(#{rest.first})" }.join}"
-      end
-
-      private
-
-      def check_field!(field)
-        return if schema.table(carrier).field?(field)
-
-        raise QueryError, "#{carrier} has no field #{field.inspect}"
-      end
-
-      # Ordering happens on what the query outputs, not on what it started from.
-      def check_output_field!(field)
-        return if output_fields.include?(field.to_sym)
-
-        raise QueryError, "#{field.inspect} is not in the result: #{output_fields.inspect}"
-      end
-
-      # The fold consumes the relation, so the fragment is closed once it starts.
-      # A subobject of a *grouped* relation is `HAVING`, which is a different
-      # operation and is not offered yet rather than being quietly conflated.
-      def check_fragment_open!(operation)
-        return unless grouped?
-
-        raise QueryError, "#{operation} cannot follow group — the fragment ends where the fold begins"
       end
     end
   end

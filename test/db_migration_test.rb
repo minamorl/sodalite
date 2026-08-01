@@ -69,6 +69,40 @@ class DBHistoryTest < Minitest::Test
     end
   end
 
+  # Σ_F: the coproduct of two objects with the same shape, tagged by which
+  # injection each element came through. Its inverse decomposes it along the tag,
+  # so both directions are reversible.
+  ANIMALS = Sodalite::DB.history(
+    [:create_table, :cats, { id: :integer, name: :string }],
+    [:create_table, :dogs, { id: :integer, name: :string }],
+    [:merge_tables, %i[cats dogs], :animals, :species]
+  )
+
+  def test_the_coproduct_tags_each_element_with_its_injection
+    assert_equal [:animals], ANIMALS.schema.names
+    assert_equal %i[id name species], ANIMALS.schema.table(:animals).fields
+  end
+
+  def test_a_coproduct_of_objects_with_different_shapes_is_not_a_table
+    error = assert_raises(Sodalite::DB::MigrationError) do
+      Sodalite::DB.history(
+        [:create_table, :cats, { id: :integer, name: :string }],
+        [:create_table, :dogs, { id: :integer, breed: :string }],
+        [:merge_tables, %i[cats dogs], :animals, :species]
+      )
+    end
+
+    assert_match(/do not share a shape/, error.message)
+  end
+
+  def test_the_coproduct_and_its_decomposition_are_inverse
+    before = ANIMALS.spec_at(2)
+    merge = ANIMALS.steps.last
+
+    assert_predicate merge, :reversible?
+    assert_equal before, merge.inverse(before).apply(merge.apply(before))
+  end
+
   def test_an_unknown_step_kind_is_refused
     assert_raises(Sodalite::DB::MigrationError) { Sodalite::DB.history(%i[reticulate users]) }
   end
@@ -128,6 +162,39 @@ class DBMigrationConformanceTest < Minitest::Test
     error = assert_raises(Sodalite::DB::MigrationError) { @sql.migrate!(edited) }
 
     assert_match(/was applied as/, error.message)
+  end
+
+  # Both models carry the coproduct the same way: one disjoint union of Hashes,
+  # one INSERT ... SELECT per injection.
+  def test_both_models_carry_the_coproduct_identically
+    history = DBHistoryTest::ANIMALS
+    memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(history.spec_at(2)))
+    sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(history.spec_at(0)), Adapter.new)
+    sql.migrate!(Sodalite::DB.history(*history.steps.first(2)))
+    [memory, sql].each do |model|
+      model.insert(:cats, { id: 1, name: 'mi' })
+      model.insert(:dogs, { id: 2, name: 'pochi' })
+      model.migrate!(history)
+    end
+
+    query = history.schema[:animals].order(:id)
+
+    assert_equal memory.select(query), sql.select(query)
+    assert_equal(%w[cats dogs], memory.select(query).map { |row| row[:species] })
+  end
+
+  def test_the_decomposition_puts_the_elements_back
+    history = Sodalite::DB.history(
+      *DBHistoryTest::ANIMALS.steps,
+      [:split_table, :animals, :species, { 'cats' => :cats, 'dogs' => :dogs }]
+    )
+    memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(history.spec_at(2)))
+    memory.insert(:cats, { id: 1, name: 'mi' })
+    memory.insert(:dogs, { id: 2, name: 'pochi' })
+    memory.migrate!(history)
+
+    assert_equal [{ id: 1, name: 'mi' }], memory.rows(:cats)
+    assert_equal [{ id: 2, name: 'pochi' }], memory.rows(:dogs)
   end
 
   class Adapter

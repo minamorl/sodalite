@@ -10,6 +10,7 @@ module Sodalite
     # conformance check between them mean something.
     class Memory
       include Carries
+      include Evaluates
 
       attr_reader :schema
 
@@ -48,12 +49,32 @@ module Sodalite
       # --- evaluation ---------------------------------------------------------
 
       def select(query)
-        rows = @store.fetch(query.root).map(&:dup)
-        query.steps.each { |step| rows = apply(step, rows) }
+        rows = source(query)
         rows = fold(query, rows) if query.grouped?
+        if query.grouped?
+          rows = rows.select do |row|
+            query.havings.all? do |h|
+              compare?(row[h[0]], h[2], h[1])
+            end
+          end
+        end
         return present(query, rows) if query.ordered?
 
         Relation[rows, schema: query.row_schema]
+      end
+
+      # Phase one, including the coproduct: SQL's `UNION` deduplicates, so it is
+      # set union, and `Relation` is a set — the two agree without extra work.
+      def source(query)
+        rows = phase_one(query)
+        query.unions.each { |other| rows = (rows + phase_one(other)).uniq }
+        rows
+      end
+
+      def phase_one(query)
+        rows = @store.fetch(query.root).map(&:dup)
+        query.steps.each { |step| rows = apply(step, rows) }
+        rows
       end
 
       # A fold along the fibers of the grouping map: partition, then reduce each
@@ -120,22 +141,6 @@ module Sodalite
       end
 
       private
-
-      def apply(step, rows)
-        kind, *rest = step
-        case kind
-        when :where  then rows.select { |row| row[rest[0]] == rest[1] }
-        when :follow then follow(rows, rest[0], rest[1])
-        when :select then rows.map { |row| row.slice(*rest[0]) }.uniq
-        end
-      end
-
-      # Composition, then image: the set of targets actually hit.
-      def follow(rows, fk, target)
-        wanted = rows.to_set { |row| row[fk] }
-        key = @schema.table(target).key
-        @store[target].select { |row| wanted.include?(row[key]) }.map(&:dup)
-      end
 
       def stringify(row)
         row.to_h { |field, value| [field.to_s, value] }

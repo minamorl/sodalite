@@ -7,10 +7,14 @@ require_relative 'db/aggregate'
 require_relative 'db/schema'
 require_relative 'db/migration'
 require_relative 'db/carries'
+require_relative 'db/query_checks'
+require_relative 'db/query_phases'
 require_relative 'db/query'
 require_relative 'db/relation'
+require_relative 'db/evaluates'
 require_relative 'db/memory'
 require_relative 'db/sql'
+require_relative 'db/ddl'
 
 module Sodalite
   # The database boundary as a theory with models, rather than a bag of lambdas.

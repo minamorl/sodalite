@@ -239,8 +239,9 @@ the same world. Right now it cannot. This is how it could.
   database. There are no mutable objects here.
 - **No ambient connection.** The pool is a handler's captured state, so "which database" is the same
   knob as "which world" — one mechanism, not two.
-- **No query DSL beyond the three phases.** `HAVING`, `UNION`, and `NOT` are not offered yet rather
-  than being quietly conflated with `where`; beyond them, declared raw SQL with a typed result.
+- **No query DSL beyond what the structure justifies.** `having` exists and is a different word from
+  `where` because a grouped relation is a different set. Window functions, recursive CTEs, and
+  arbitrary expressions are not offered; beyond them, declared raw SQL with a typed result.
 
 ## 7. Where the analogy breaks, said out loud
 

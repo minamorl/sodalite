@@ -29,8 +29,29 @@ module Sodalite
         when :create_table then @store[table] ||= []
         when :drop_table then @store.delete(table)
         when :rename_table then @store[rest[0]] = @store.delete(table)
+        when :merge_tables then merge_rows(table, rest[0], rest[1])
+        when :split_table then split_rows(table, rest[0], rest[1])
         else carry_fields(step, table, rest)
         end
+      end
+
+      # The coproduct on instances: the disjoint union, with each element
+      # carrying the injection it came through.
+      def merge_rows(sources, into, tag)
+        @store[into] = sources.flat_map do |source|
+          @store.fetch(source).map { |row| row.merge(tag => source.to_s) }
+        end
+        sources.each { |source| @store.delete(source) }
+      end
+
+      def split_rows(table, tag, into)
+        rows = @store.fetch(table)
+        into.each_value { |name| @store[name.to_sym] = [] }
+        rows.each do |row|
+          name = into.fetch(row[tag])
+          @store[name.to_sym] << row.except(tag)
+        end
+        @store.delete(table)
       end
 
       def carry_fields(step, table, rest)

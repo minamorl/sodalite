@@ -32,6 +32,8 @@ Which makes reversibility a property rather than a promise:
 | `add_attribute` | injective — the column is the constant default, so the original projects back out | reversible |
 | `drop_attribute` | a projection, not injective | **irreversible** |
 | `drop_table` | forgets an object | **irreversible** |
+| `merge_tables` | `Σ_F`, the coproduct — the discriminator column is the injection tag | reversible |
+| `split_table` | the decomposition of that coproduct along the tag | reversible |
 
 ```ruby
 HISTORY.reversible_to?(0)   # => true
@@ -48,8 +50,13 @@ constant default, so the two models disagreed until the backfill was added. The 
 step's fingerprint, so a migration edited after it ran is caught rather than silently re-meaning
 something.
 
-What is still absent: the general `Σ_F` / `Π_F` — merging and splitting tables — which needs the
-adjoints proper rather than the six step shapes offered here.
+`Σ_F` — merging two objects into their coproduct, tagged by which injection each element came
+through — is here, and so is its inverse. The two tables must share a shape, which is not a
+convenience check: without it the coproduct is not an object of the target schema.
+
+What is still absent is the **right adjoint `Π_F`**: folding two tables into one by a *product* over a
+shared key, i.e. a join materialised as a migration. The decomposition is not relabelled `Π` to look
+complete.
 
 ## Object storage: a partial function on a poset, and no transactions
 

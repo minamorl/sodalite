@@ -18,15 +18,15 @@ end
 # two worlds are the same world; this is that check.
 class DBConformanceTest < Minitest::Test
   SCHEMA = Sodalite::DB.schema(
-    users: { id: :integer, name: :string, city: :string },
+    users: { id: :integer, name: :string, city: :string, nickname: :string? },
     posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
   )
 
   SEED = {
     users: [
-      { id: 1, name: 'mina', city: 'tokyo' },
-      { id: 2, name: 'rin',  city: 'osaka' },
-      { id: 3, name: 'ghost', city: 'tokyo' }
+      { id: 1, name: 'mina', city: 'tokyo', nickname: 'mi' },
+      { id: 2, name: 'rin',  city: 'osaka', nickname: nil },
+      { id: 3, name: 'ghost', city: 'tokyo', nickname: nil }
     ],
     posts: [
       { id: 10, title: 'hello', author: 1 },
@@ -75,6 +75,44 @@ class DBConformanceTest < Minitest::Test
     'a window over a fold' => ->(s) { s[:users].group(:city).count(:people).order(:people, :desc).limit(1) },
     'the whole pipeline' => lambda { |s|
       s[:posts].where(:title, 'hello').follow(:author).group(:city).count(:people).order(:people, :desc)
+    },
+
+    # Order comparisons: subobjects wherever the attribute type carries an order.
+    'greater than' => ->(s) { s[:users].where(:id, :gt, 1) },
+    'at least' => ->(s) { s[:users].where(:id, :gte, 2) },
+    'less than' => ->(s) { s[:users].where(:id, :lt, 3) },
+    'at most' => ->(s) { s[:users].where(:id, :lte, 1) },
+    'a string comparison' => ->(s) { s[:users].where(:name, :gt, 'm') },
+    'a bounded range is two subobjects' => ->(s) { s[:users].where(:id, :gte, 1).where(:id, :lte, 2) },
+
+    # The complement, only where the type is a plain set.
+    'a complement' => ->(s) { s[:users].where(:city, :not, 'tokyo') },
+    'a complement then a fold' => ->(s) { s[:users].where(:city, :not, 'tokyo').group(:city).count(:people) },
+
+    # Eliminating `A + 1` explicitly, in both directions.
+    'the fibre over nothing' => ->(s) { s[:users].where_null(:nickname) },
+    'its complement' => ->(s) { s[:users].where_present(:nickname) },
+
+    # The coproduct. SQL's UNION deduplicates, so it is set union.
+    'a coproduct' => ->(s) { s[:users].where(:city, 'tokyo').union(s[:users].where(:city, 'osaka')) },
+    'a coproduct that overlaps deduplicates' => lambda { |s|
+      s[:users].where(:city, 'tokyo').union(s[:users].where(:id, :lte, 2))
+    },
+    'a coproduct of projections' => lambda { |s|
+      s[:users].select(:city).union(s[:users].where(:id, 1).select(:city))
+    },
+    'a fold over a coproduct' => lambda { |s|
+      s[:users].where(:city, 'tokyo').union(s[:users].where(:city, 'osaka')).group(:city).count(:people)
+    },
+    'an ordered coproduct' => lambda { |s|
+      s[:users].where(:city, 'tokyo').union(s[:users].where(:city, 'osaka')).order(:name)
+    },
+
+    # A subobject of the grouped relation, which is a different set.
+    'having' => ->(s) { s[:users].group(:city).count(:people).having(:people, :gt, 1) },
+    'having on a group key' => ->(s) { s[:users].group(:city).count(:people).having(:city, :not, 'osaka') },
+    'having then order' => lambda { |s|
+      s[:users].group(:city).count(:people).having(:people, :gte, 1).order(:people, :desc)
     }
   }.freeze
 
@@ -139,8 +177,18 @@ class DBConformanceTest < Minitest::Test
     sql, = Sodalite::DB::SQL.compile(SCHEMA[:users].group(:city).count(:people).order(:people, :desc).limit(2))
 
     assert_equal 'SELECT g.city, COUNT(*) AS people FROM ' \
-                 '(SELECT DISTINCT t0.id, t0.name, t0.city FROM users t0) g ' \
+                 '(SELECT DISTINCT t0.id, t0.name, t0.city, t0.nickname FROM users t0) g ' \
                  'GROUP BY g.city ORDER BY people DESC, city ASC LIMIT 2', sql
+  end
+
+  # The coproduct compiles to UNION, which deduplicates — so it is set union,
+  # which is what a Relation means.
+  def test_a_coproduct_compiles_to_union_and_a_having_to_having
+    union, = Sodalite::DB::SQL.compile(SCHEMA[:users].where(:id, 1).union(SCHEMA[:users].where(:id, 2)))
+    having, = Sodalite::DB::SQL.compile(SCHEMA[:users].group(:city).count(:people).having(:people, :gt, 1))
+
+    assert_includes union, ' UNION SELECT DISTINCT '
+    assert_includes having, ' HAVING people > ?'
   end
 
   # Rollback is not a feature either model implements for the caller's benefit —
