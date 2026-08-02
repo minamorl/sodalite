@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
 require 'digest'
+require_relative 'plan'
 
 module Sodalite
+  # Predicate derivation lives beside the functor it describes.
+  # rubocop:disable Metrics/ModuleLength
   module DB
-    class MigrationError < StandardError; end
+    class MigrationError < KeyError; end
 
     # A schema change is a functor `F : C -> D` between presentations, and the
     # data migration is what `F` induces on instances. Writing `up` and `down` by
@@ -43,6 +46,9 @@ module Sodalite
     INJECTIVE_STEPS = %i[create_table add_attribute rename_attribute rename_table
                          merge_tables split_table].freeze
 
+    # Injectivity asks whether information survives; expansion asks whether the old presentation embeds.
+    EXPAND_STEPS = %i[create_table add_attribute].freeze
+
     Step = Data.define(:kind, :args) do
       def self.[](kind, *args)
         raise MigrationError, "unknown migration step #{kind.inspect}" unless STEP_KINDS.include?(kind)
@@ -52,6 +58,42 @@ module Sodalite
 
       def reversible?
         INJECTIVE_STEPS.include?(kind)
+      end
+
+      # This is independent of reversibility: an isomorphic rename still breaks
+      # old code, because the old presentation is not included under its names.
+      def expand?
+        EXPAND_STEPS.include?(kind)
+      end
+
+      def requires(_spec)
+        table, *rest = args
+        return rest[0].values.grep(FK).map(&:target).uniq if kind == :create_table
+        return table if kind == :merge_tables
+        return [attribute(table, rest[0])] if %i[split_table drop_attribute rename_attribute].include?(kind)
+
+        [table]
+      end
+
+      def provides(spec)
+        table, *rest = args
+        case kind
+        when :create_table then names_for(table, rest[0])
+        when :rename_table then names_for(rest[0], apply(spec).fetch(rest[0]))
+        when :merge_tables then [rest[0], attribute(rest[0], :*)]
+        when :split_table then split_names(spec)
+        else provided_attribute(table, rest)
+        end
+      end
+
+      def removes(_spec)
+        table, *rest = args
+        case kind
+        when :drop_attribute, :rename_attribute then [attribute(table, rest[0])]
+        when :drop_table, :rename_table, :split_table then [table, attribute(table, :*)]
+        when :merge_tables then table.flat_map { |name| [name, attribute(name, :*)] }
+        else []
+        end
       end
 
       def fingerprint
@@ -130,6 +172,23 @@ module Sodalite
 
       private
 
+      def attribute(table, field)
+        :"#{table}.#{field}"
+      end
+
+      def names_for(table, fields)
+        [table, *fields.keys.map { |field| attribute(table, field) }]
+      end
+
+      def split_names(spec)
+        apply(spec).flat_map { |name, fields| names_for(name, fields) }
+      end
+
+      def provided_attribute(table, rest)
+        field = kind == :rename_attribute ? rest[1] : rest[0]
+        %i[add_attribute rename_attribute].include?(kind) ? [attribute(table, field)] : []
+      end
+
       def rename_field(spec, table, from, renamed)
         fields = spec.fetch(table).to_h { |field, type| [field == from ? renamed : field, type] }
         spec.merge(table => fields)
@@ -138,11 +197,21 @@ module Sodalite
 
     # The ordered composite. A version is how far along it a database has got.
     class History
-      attr_reader :steps
+      attr_reader :steps, :plan
 
       def initialize(steps)
         @steps = steps.map { |step| step.is_a?(Step) ? step : Step[*step] }.freeze
-        spec_at(@steps.size) # fail at declaration if the composite does not typecheck
+        before = {}
+        presentations = @steps.to_h do |step|
+          presentation = before
+          before = step.apply(before)
+          [step, presentation]
+        rescue KeyError
+          [step, presentation]
+        end
+        @plan = Plan.new(@steps, presentations)
+        # The composite and the solved order both fail at declaration, never on a request path.
+        spec_at(@steps.size)
         freeze
       end
 
@@ -177,4 +246,5 @@ module Sodalite
       end
     end
   end
+  # rubocop:enable Metrics/ModuleLength
 end
