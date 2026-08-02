@@ -27,8 +27,10 @@ module Sodalite
     class Sequel
       include SequelDDL
       include SequelArrows
+      include Ledger
 
       LEDGER = :sodalite_migrations
+      MIGRATION_LOCK = :sodalite_migration_lock
 
       attr_reader :schema
 
@@ -81,22 +83,36 @@ module Sodalite
 
       # --- migration ----------------------------------------------------------
 
-      def migrate!(history)
+      def read_ledger
         ensure_ledger!
-        seen = applied
-        history.steps.each_with_index do |step, version|
-          next check_fingerprint!(step, version, seen) if seen.key?(version)
-
-          @schema = history.schema_at(version + 1)
-          carry(step)
-          @db[LEDGER].insert(version: version, step: step.to_s, fingerprint: step.fingerprint)
-        end
-        self
+        @db[LEDGER].select_hash(:fingerprint, :step)
       end
 
-      def applied
+      def record_step(step)
         ensure_ledger!
-        @db[LEDGER].select_hash(:version, :fingerprint)
+        @db[LEDGER].insert(fingerprint: step.fingerprint, step: step.to_s)
+        nil
+      end
+
+      def forget_step(step)
+        ensure_ledger!
+        @db[LEDGER].where(fingerprint: step.fingerprint).delete
+        nil
+      end
+
+      def claim_lock(token)
+        ensure_lock!
+        # Sequel, rather than handwritten SQL, owns the backend's dialect here.
+        @db[MIGRATION_LOCK].insert(id: 1, token: token)
+        true
+      rescue ::Sequel::UniqueConstraintViolation
+        false
+      end
+
+      def release_lock(token)
+        ensure_lock!
+        @db[MIGRATION_LOCK].where(id: 1, token: token).delete
+        nil
       end
 
       private
@@ -105,17 +121,18 @@ module Sodalite
         return if @db.table_exists?(LEDGER)
 
         @db.create_table(LEDGER) do
-          Integer :version, primary_key: true
+          String :fingerprint, primary_key: true
           String :step
-          String :fingerprint
         end
       end
 
-      def check_fingerprint!(step, version, seen)
-        return if seen[version] == step.fingerprint
+      def ensure_lock!
+        return if @db.table_exists?(MIGRATION_LOCK)
 
-        raise MigrationError,
-              "migration #{version} was applied as #{seen[version]} but now reads #{step.fingerprint}"
+        @db.create_table(MIGRATION_LOCK) do
+          Integer :id, primary_key: true
+          String :token
+        end
       end
     end
   end

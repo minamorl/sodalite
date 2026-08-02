@@ -3,24 +3,8 @@
 module Sodalite
   module DB
     # The instance half of a migration for the in-memory model: what the functor
-    # on presentations induces on the rows. `applied` is this model's ledger; the
-    # SQL model keeps the same thing in a table.
+    # on presentations induces on the rows.
     module Carries
-      # The induced map on instances. `applied` is this model's ledger; the SQL
-      # model keeps the same thing in a table.
-      attr_reader :applied
-
-      def migrate!(history)
-        history.steps.each_with_index do |step, version|
-          next if @applied.include?(version)
-
-          @schema = history.schema_at(version + 1)
-          carry(step)
-          @applied << version
-        end
-        self
-      end
-
       # Mirrors `Step#apply` on the presentation side: the object-level changes
       # here, the field-level ones next door.
       def carry(step)

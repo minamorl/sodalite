@@ -156,23 +156,23 @@ class DBMigrationConformanceTest < Minitest::Test
   def test_migrating_twice_applies_nothing_the_second_time
     2.times { models.each { |model| model.migrate!(HISTORY) } }
 
-    assert_equal [0, 1, 2, 3], @sql.applied.keys.sort
-    assert_equal [0, 1, 2, 3], @sequel.applied.keys.sort
+    assert_equal HISTORY.fingerprints.sort, @sql.applied.keys.sort
+    assert_equal HISTORY.fingerprints.sort, @sequel.applied.keys.sort
     assert_equal 1, @memory.rows(:users).size
   end
 
-  # The ledger records each step's fingerprint, so a migration edited after it
-  # ran is caught rather than silently meaning something else.
-  def test_a_migration_edited_after_it_ran_is_caught
+  # Content addressing makes an edited migration a new, unapplied step instead
+  # of claiming that the declaration-order slot was corrupted.
+  def test_a_migration_edited_after_it_ran_is_unapplied
     @sql.migrate!(HISTORY)
     edited = Sodalite::DB.history(
       [:create_table, :users, { id: :integer, name: :string }],
       [:add_attribute, :users, :city, :string, 'somewhere else']
     )
 
-    error = assert_raises(Sodalite::DB::MigrationError) { @sql.migrate!(edited) }
+    @sql.migrate!(edited)
 
-    assert_match(/was applied as/, error.message)
+    assert_includes @sql.applied, edited.steps.last.fingerprint
   end
 
   # What the Sequel backend actually buys, measured rather than assumed. The
