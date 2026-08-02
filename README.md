@@ -41,6 +41,22 @@ GET /users/abc   -> 400 {"error":{"code":"invalid_request",...},
                                         "message":"expected integer, got string"}]}
 ```
 
+## Using it
+
+[**The usage guide**](docs/usage.md) is the task-indexed version of everything below: what to type, in
+the order you will need it.
+
+| I want to... | Start here |
+| --- | --- |
+| run something before reading anything | [Install and run something](docs/usage.md#1-install-and-run-something) |
+| declare a route and the shape of its request | [Declare a route](docs/usage.md#2-declare-a-route) - [Say what a request looks like](docs/usage.md#3-say-what-a-request-looks-like) |
+| reach a database, an object store, or my own IO | [Reach the world](docs/usage.md#6-reach-the-world) - [Reach a database](docs/usage.md#7-reach-a-database) |
+| add a column without taking the service down | [Change the schema](docs/usage.md#9-change-the-schema) - [Deploy a schema change](docs/usage.md#10-deploy-a-schema-change) |
+| test without writing a single mock | [Test](docs/usage.md#12-test) |
+| find out why it refused to start | [When it refuses](docs/usage.md#14-when-it-refuses) |
+
+The rest of this README says *why* the framework is shaped this way. The guide says how to work it.
+
 ## The stack
 
 Nothing in this column is new. The framework is the wiring, and the wiring is the whole claim: each
@@ -296,6 +312,7 @@ published yet, so development takes all three siblings from git.
 
 | Guide | What it covers |
 | --- | --- |
+| [Using sodalite](docs/usage.md) | The task-indexed guide: routes, requests, effects, the database, schema changes, deploys, tests, and every refusal explained |
 | [The design](docs/design.md) | Why each layer is there, the two vocabularies, and what is deliberately not built |
 | [History and storage](docs/migrations.md) | Migrations as functors with computed reversibility, and object storage as a partial function with sagas |
 | [The RDBMS boundary](docs/rdbms.md) | The database as a theory with models: schemas as categories, queries as arrows, transactions as combinators |
@@ -306,6 +323,7 @@ published yet, so development takes all three siblings from git.
 ruby -Ilib examples/service/app.rb          # the whole service, against a fixed world
 ruby -Ilib examples/service/app.rb openapi  # its published document, from the routes
 ruby -Ilib examples/service/boot.rb         # the same service on puma
+ruby -Ilib examples/service/migrate.rb plan # the solved migration layers, before applying any
 rackup examples/service/config.ru           # or any Rack server
 ```
 
