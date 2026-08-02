@@ -61,3 +61,7 @@ Naming/MethodParameterName:
     - id
     - as
     - db
+    # `to:` is the migration vocabulary — rollback!(history, to: 3) reads as the
+    # sentence it is. Spelling it `target_version` would name the wrong thing:
+    # it is a step count along the solved order, not a version.
+    - to

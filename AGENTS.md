@@ -38,6 +38,11 @@ Read `docs/design.md` before changing the design.
   decides the cost — raise under `fixed`, logged 500 under `real`. Do not turn it into a plain 500.
 - **The app is frozen at boot** and shared across Puma threads. Nothing may become mutable shared
   state. Per-request state is one `Berylx::Root` and nothing else.
+- **A migration is a set, and the order is solved.** Steps declare what they require, provide, and
+  remove; `Plan` derives the layers. Never reintroduce an index as the ledger key — that is what made
+  an ordinary branch merge look like an edited migration. Applying is one explicit command with a
+  lock; boot verifies and refuses, and never migrates. Expansion (`create_table`, `add_attribute`) is
+  a different set from reversibility, and code must not conflate them.
 - **`:sodalite_*` tags are the framework's.** Application tags that collide raise; keep it that way.
 - **Capabilities compose through `Effects.assemble`, not by nesting one map inside another.** A scope
   (a transaction, a saga) is handed `rebuild` and re-derives the *whole* map with one capability

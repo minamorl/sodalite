@@ -19,6 +19,7 @@ module Sodalite
         case step.kind
         when :create_table then [[SQL.create_table_statement(schema.table(table)), []]]
         when :drop_table then [["DROP TABLE #{table}", []]]
+        when :rename_table then [["ALTER TABLE #{table} RENAME TO #{rest[0]}", []]]
         when :merge_tables then merge_tables(schema, table, rest[0], rest[1])
         when :split_table then split_table(schema, table, rest[0], rest[1])
         else alter(step, schema, table, rest)

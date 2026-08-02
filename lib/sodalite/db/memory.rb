@@ -8,18 +8,46 @@ module Sodalite
     # This is not a stub that returns what a test author decided. It is a model
     # of the same theory the SQL model is a model of, which is what makes the
     # conformance check between them mean something.
-    class Memory
+    class Memory # rubocop:disable Metrics/ClassLength
       include Carries
       include Evaluates
+      include Ledger
 
       attr_reader :schema
 
       def initialize(schema, seed = {})
-        @applied = schema.is_a?(History) ? (0...schema.size).to_a : []
+        @applied = schema.is_a?(History) ? schema.steps.to_h { |step| [step.fingerprint, step.to_s] } : {}
         @schema = schema.is_a?(History) ? schema.schema : schema
-        @store = schema.names.to_h { |name| [name, []] }
+        @store = @schema.names.to_h { |name| [name, []] }
         seed.each { |table, rows| rows.each { |row| insert(table, row) } }
         @lock = Mutex.new
+        @lock_token = nil
+      end
+
+      def read_ledger = @applied.dup
+
+      def record_step(step)
+        @applied[step.fingerprint] = step.to_s
+        nil
+      end
+
+      def forget_step(step)
+        @applied.delete(step.fingerprint)
+        nil
+      end
+
+      def claim_lock(token)
+        @lock.synchronize do
+          next false if @lock_token
+
+          @lock_token = token
+          true
+        end
+      end
+
+      def release_lock(token)
+        @lock.synchronize { @lock_token = nil if @lock_token == token }
+        nil
       end
 
       # --- the functor laws, checkable ---------------------------------------
@@ -145,6 +173,6 @@ module Sodalite
       def stringify(row)
         row.to_h { |field, value| [field.to_s, value] }
       end
-    end
+    end # rubocop:enable Metrics/ClassLength
   end
 end

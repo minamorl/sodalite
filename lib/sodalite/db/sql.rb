@@ -141,6 +141,8 @@ module Sodalite
     # whole port, so sqlite3, pg, or a fake all plug in the same way and the gem
     # depends on none of them.
     class Sql
+      include Ledger
+
       attr_reader :schema
 
       def initialize(schema, connection)
@@ -185,42 +187,60 @@ module Sodalite
 
       # --- migration ----------------------------------------------------------
       LEDGER = 'sodalite_migrations'
+      MIGRATION_LOCK = 'sodalite_migration_lock'
 
-      # The ledger records the fingerprint of each applied step, so a migration
-      # edited after the fact is caught rather than silently re-meaning something.
-      def migrate!(history)
+      def read_ledger
         ensure_ledger!
-        applied = self.applied
-        history.steps.each_with_index do |step, version|
-          next check_fingerprint!(step, version, applied) if applied.key?(version)
-
-          @schema = history.schema_at(version + 1)
-          DDL.ddl(step, @schema).each { |sql, binds| @connection.execute(sql, binds) }
-          @connection.execute("INSERT INTO #{LEDGER} (version, step, fingerprint) VALUES (?, ?, ?)",
-                              [version, step.to_s, step.fingerprint])
-        end
-        self
+        @connection.execute("SELECT fingerprint, step FROM #{LEDGER}", []).to_h
       end
 
-      def applied
+      def record_step(step)
         ensure_ledger!
-        @connection.execute("SELECT version, fingerprint FROM #{LEDGER}", [])
-                   .to_h { |version, fingerprint| [version, fingerprint] }
+        @connection.execute("INSERT INTO #{LEDGER} (fingerprint, step) VALUES (?, ?)",
+                            [step.fingerprint, step.to_s])
+        nil
       end
+
+      def forget_step(step)
+        ensure_ledger!
+        @connection.execute("DELETE FROM #{LEDGER} WHERE fingerprint = ?", [step.fingerprint])
+        nil
+      end
+
+      def carry(step)
+        DDL.ddl(step, @schema).each { |sql, binds| @connection.execute(sql, binds) }
+        nil
+      end
+
+      def claim_lock(token) # rubocop:disable Naming/PredicateMethod
+        ensure_lock!
+        # This spelling targets SQLite/Postgres; MySQL requires `FROM DUAL`.
+        @connection.execute(
+          "INSERT INTO #{MIGRATION_LOCK} (id, token) SELECT 1, ? " \
+          "WHERE NOT EXISTS (SELECT 1 FROM #{MIGRATION_LOCK})", [token]
+        )
+        @connection.execute("SELECT token FROM #{MIGRATION_LOCK} WHERE id = 1", []).dig(0, 0) == token
+      end
+
+      def release_lock(token)
+        ensure_lock!
+        @connection.execute("DELETE FROM #{MIGRATION_LOCK} WHERE id = 1 AND token = ?", [token])
+        nil
+      end
+
+      private
 
       def ensure_ledger!
-        @connection.execute(
-          "CREATE TABLE IF NOT EXISTS #{LEDGER} " \
-          '(version INTEGER PRIMARY KEY, step TEXT, fingerprint TEXT)', []
-        )
+        @connection.execute("CREATE TABLE IF NOT EXISTS #{LEDGER} " \
+                            '(fingerprint TEXT PRIMARY KEY, step TEXT)', [])
       end
 
-      def check_fingerprint!(step, version, applied)
-        return if applied[version] == step.fingerprint
-
-        raise MigrationError,
-              "migration #{version} was applied as #{applied[version]} but now reads #{step.fingerprint}"
+      def ensure_lock!
+        @connection.execute("CREATE TABLE IF NOT EXISTS #{MIGRATION_LOCK} " \
+                            '(id INTEGER PRIMARY KEY, token TEXT)', [])
       end
+
+      public
 
       # Same shape as the memory model's: the caller never asks for a rollback,
       # it is what `Err` means here too.
