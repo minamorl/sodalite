@@ -51,3 +51,13 @@ Minitest/MultipleAssertions:
 # against — a row of unlabelled positionals — does not arise.
 Metrics/ParameterLists:
   CountKeywordArgs: false
+
+# `fk` is the domain's word for a foreign key, i.e. a morphism of the schema
+# category. Spelling it out would not make it clearer.
+Naming/MethodParameterName:
+  AllowedNames:
+    - fk
+    - io
+    - id
+    - as
+    - db

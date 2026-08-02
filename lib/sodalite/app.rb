@@ -25,6 +25,23 @@ module Sodalite
 
     attr_reader :routes, :handlers
 
+    # The assembled form: the routes, the capabilities they reach through, the
+    # verbs the application invented, and the statuses it publishes for its own
+    # error codes — in one place, because a service needs all four and used to
+    # have to wire them together by hand.
+    #
+    #   Sodalite::App.build(
+    #     routes:       ROUTES,
+    #     capabilities: [Sodalite::DB.capability(db), Sodalite::Store.capability(objects)],
+    #     effects:      { send_mail: Mailer.method(:deliver) },
+    #     errors:       { not_found: 404, forbidden: 403 },
+    #     world:        :real)
+    def self.build(routes:, capabilities: [], effects: {}, errors: {}, world: :fixed, **)
+      new(routes: routes, errors: errors,
+          handlers: Effects.assemble(capabilities: capabilities, effects: effects, world: world),
+          **)
+    end
+
     def initialize(routes:, handlers: nil, errors: {}, max_body_bytes: DEFAULT_MAX_BODY_BYTES)
       @routes = Array(routes).freeze
       @router = Router.new(@routes)

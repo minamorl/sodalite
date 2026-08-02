@@ -119,6 +119,141 @@ dead-ends backtracks rather than shadowing a parameter route that would have mat
 split before they are percent-decoded, so `%2F` is data inside one segment and never invents a path
 separator.
 
+## Assembling a service
+
+A service reaches a database *and* an object store *and* whatever verbs it invented. All four go in
+one place:
+
+```ruby
+app = Sodalite::App.build(
+  routes:       ROUTES,
+  capabilities: [Sodalite::DB.capability(db), Sodalite::Store.capability(objects)],
+  effects:      { send_mail: Mailer.method(:deliver) },
+  errors:       { not_found: 404, forbidden: 403 },
+  world:        :real
+)
+```
+
+Swap `world:` and the capabilities, and the same routes run against fixed values with no database, no
+clock, and no socket. Scopes survive the swap: a saga rebuilds the map with the store journalled and
+still reaches the database; a transaction rolls the database back and leaves the store alone, because
+an object store cannot join a transaction and this does not pretend it can.
+
+Liveness and readiness are two questions, so they are two routes. Liveness is framework-level;
+readiness is not, because only the service knows what it needs before it should be sent traffic:
+
+```ruby
+Sodalite.health
+Sodalite.health(path: '/ready', checks: {
+  database: ->(io) { io.perform(Sodalite::DB::SELECT, HEARTBEAT) },
+  objects:  ->(io) { io.perform(Sodalite::Store::LIST, '') }
+})
+```
+
+A check that returns falsy or raises is down, and any down check makes the whole answer 503.
+
+## The document is a fold over the routes
+
+Every route already carries its full declared shape as data, so the published contract is derived
+rather than maintained:
+
+```ruby
+Sodalite::OpenAPI.document(app, title: 'users', version: '1.0')
+```
+
+Path templates are rewritten to OpenAPI's spelling, enums publish their closed set, `?` becomes
+`nullable` and drops out of `required`, and the statuses the framework itself can produce — 400, 404,
+405, and 415/413 where a body is declared — are published too, with the error shape that is actually
+sent. It will not invent: a refinement's predicate is a Ruby block with no JSON Schema, so it
+publishes its own label in `description` rather than claiming a wider contract than the service
+accepts.
+
+## The database is a theory with models
+
+`Sodalite::DB` replaces "the handler map is a bag of lambdas" with a fixed relational signature, so a
+handler map becomes a *model* of a theory rather than a model of nothing.
+
+```ruby
+SCHEMA = Sodalite::DB.schema(
+  users: { id: :integer, name: :string, city: :string },
+  posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
+)
+
+in_tokyo = SCHEMA[:posts].where(:title, 'hello').follow(:author).where(:city, 'tokyo').select(:name)
+
+busy = SCHEMA[:users].group(:city).count(:people).having(:people, :gt, 1).order(:people, :desc)
+adults = SCHEMA[:users].where(:age, :gte, 18).union(SCHEMA[:users].where_null(:age))
+```
+
+`where` takes an order comparison wherever the attribute type carries an order, and a complement
+wherever the type is a plain set — over a nullable column `NOT (x = 3)` is three-valued, so the
+complement is refused there and `where_null` / `where_present` eliminate the `A + 1` explicitly.
+
+A schema is a finitely presented category: tables are objects, foreign keys are morphisms, and an
+instance is a functor into `Set` — so a dangling foreign key is not a bad row, it is a failure to be a
+functor, and `model.functor?` says so. There is no `join` in the query language: `follow` is
+composition, and the join is what the compiler emits.
+
+```
+SELECT DISTINCT t1.name FROM posts t0 JOIN users t1 ON t0.author = t1.id
+WHERE t0.title = ? AND t1.city = ?
+```
+
+Three models, not a stub and the real thing: `DB.memory` (an instance functor into Set), `DB.sql`
+(arrows compiled to SQL text, no driver anywhere near it), and `DB.sequel` (the same arrows lowered
+onto Sequel's expression API, which knows dialects and quoting). `test/db_conformance_test.rb` drives
+fifty arrow shapes through all three and asserts they agree. That is the upgrade: the fixed world no
+longer returns what a test author decided, it computes the same query somewhere cheaper — and a bug
+would have to occur in three independent lowerings, identically, to survive.
+
+Sequel is a **backend** here, not a second query language: the arrows are the theory, and dialects,
+quoting, and pooling are what Sequel is for. It stays out of the runtime dependencies the same way no
+driver is in them — `DB.sequel` takes a database someone else built.
+
+A transaction is a combinator whose handler runs the subtree, and rollback is what `Err` means to it:
+
+```ruby
+Sodalite::DB.atomically(:checkout, reserve >> charge >> confirm)
+```
+
+Nobody asks for the rollback. `berylx` short-circuits at the first `Err`, the scope sees it, and the
+failure still carries which named task produced it. [The design note](docs/rdbms.md) works through the
+category theory, and section 7 names the five places it does not reach — `NULL`, ordering, aggregation,
+isolation levels, and schema migration.
+
+## History and storage
+
+A migration step is a functor, so **reversibility is computed rather than promised**:
+
+```ruby
+HISTORY = Sodalite::DB.history(
+  [:create_table,     :users, { id: :integer, name: :string }],
+  [:add_attribute,    :users, :city, :string, 'unknown'],
+  [:rename_attribute, :users, :city, :town]
+)
+
+HISTORY.schema              # the composite — nothing is declared twice
+HISTORY.reversible_to?(0)   # => true; a drop_attribute would make it false
+```
+
+`rename` is an isomorphism, `add_attribute` is injective (the column is the constant default, so the
+original projects back out), `drop_attribute` is a projection and forgets. That answer arrives before
+a statement runs. Both models carry the history and the conformance suite covers "migrate, then
+query".
+
+Object storage gets the same treatment. A bucket is a partial function `Key ⇀ Object` whose keys form
+a poset under the prefix order, so `list(prefix)` is that order's principal filter — and there are no
+transactions, which the design states rather than hides:
+
+```ruby
+Sodalite::Store.saga(:publish, upload >> index >> announce)
+```
+
+A write records its inverse; an `Err` replays the inverses backwards. It is lax — compensation cannot
+unread — and there is a test asserting that rather than a footnote mentioning it. `Store.memory` and
+`Store.filesystem` are conformance-checked against each other; `Store.s3` is the same shape over a
+four-method port. [The design note](docs/migrations.md) has the rest.
+
 ## Streaming
 
 The sieve reads NDJSON and SSE one record at a time; this writes them the same way, validating each
@@ -148,11 +283,16 @@ published yet, so development takes all three siblings from git.
 | Guide | What it covers |
 | --- | --- |
 | [The design](docs/design.md) | Why each layer is there, the two vocabularies, and what is deliberately not built |
-| [`examples/service.rb`](examples/service.rb) | A complete service, run twice — against a fixed world in process, and on Puma |
+| [History and storage](docs/migrations.md) | Migrations as functors with computed reversibility, and object storage as a partial function with sagas |
+| [The RDBMS boundary](docs/rdbms.md) | The database as a theory with models: schemas as categories, queries as arrows, transactions as combinators |
+| [`examples/service/`](examples/service) | A complete service: routes, a database, an object store, a saga, health and readiness, `config.ru`, and the OpenAPI document |
+| [`examples/minimal.rb`](examples/minimal.rb) | The smallest thing that runs, twice — against a fixed world in process, and on Puma |
 
 ```sh
-ruby -Ilib examples/service.rb          # deterministic, no server
-ruby -Ilib examples/service.rb serve    # puma on 127.0.0.1:9292
+ruby -Ilib examples/service/app.rb          # the whole service, against a fixed world
+ruby -Ilib examples/service/app.rb openapi  # its published document, from the routes
+ruby -Ilib examples/service/boot.rb         # the same service on puma
+rackup examples/service/config.ru           # or any Rack server
 ```
 
 ## Why "sodalite"

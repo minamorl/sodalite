@@ -3,8 +3,8 @@
 # A complete zeolite-web service, and the same service run twice: once against
 # a fixed world with no server at all, and once on Puma over a real socket.
 #
-#   ruby -Ilib examples/service.rb          # in-process, deterministic
-#   ruby -Ilib examples/service.rb serve    # puma on 127.0.0.1:9292
+#   ruby -Ilib examples/minimal.rb          # in-process, deterministic
+#   ruby -Ilib examples/minimal.rb serve    # puma on 127.0.0.1:9292
 #
 # Nothing about the routes changes between the two. Only the handler map does.
 

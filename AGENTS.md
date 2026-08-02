@@ -39,6 +39,12 @@ Read `docs/design.md` before changing the design.
 - **The app is frozen at boot** and shared across Puma threads. Nothing may become mutable shared
   state. Per-request state is one `Berylx::Root` and nothing else.
 - **`:sodalite_*` tags are the framework's.** Application tags that collide raise; keep it that way.
+- **Capabilities compose through `Effects.assemble`, not by nesting one map inside another.** A scope
+  (a transaction, a saga) is handed `rebuild` and re-derives the *whole* map with one capability
+  swapped. Merging over a finished map is the failure that looks like it works: the combinator
+  handlers inside close over the map they were built with, so the subtree runs on the old bindings.
+- **The OpenAPI document is derived, never maintained.** If a shape is not readable from the route's
+  declaration, the answer is to declare it, not to annotate the document.
 
 ## Commands
 
@@ -47,8 +53,10 @@ bundle install
 bundle exec rake              # tests + rubocop
 bundle exec rake test
 bundle exec rubocop
-ruby -Ilib examples/service.rb         # the framework against a fixed world
-ruby -Ilib examples/service.rb serve   # the same service on puma
+ruby -Ilib examples/service/app.rb          # the whole service, against a fixed world
+ruby -Ilib examples/service/app.rb openapi  # its published document
+ruby -Ilib examples/service/boot.rb         # the same service on puma
+ruby -Ilib examples/minimal.rb              # the smallest thing that runs
 ```
 
 `test/puma_test.rb` boots real Puma on an ephemeral port; it is the one suite that needs a socket.
