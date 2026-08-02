@@ -43,17 +43,23 @@ GET /users/abc   -> 400 {"error":{"code":"invalid_request",...},
 
 ## Using it
 
-[**The usage guide**](docs/usage.md) is the task-indexed version of everything below: what to type, in
-the order you will need it.
+[**The usage guide**](docs/usage.md) walks the work in the order it happens. You do not start a
+service by choosing a route template — you start by deciding what the data is, so that is where the
+guide starts too.
 
 | I want to... | Start here |
 | --- | --- |
-| run something before reading anything | [Install and run something](docs/usage.md#1-install-and-run-something) |
-| declare a route and the shape of its request | [Declare a route](docs/usage.md#2-declare-a-route) - [Say what a request looks like](docs/usage.md#3-say-what-a-request-looks-like) |
-| reach a database, an object store, or my own IO | [Reach the world](docs/usage.md#6-reach-the-world) - [Reach a database](docs/usage.md#7-reach-a-database) |
-| add a column without taking the service down | [Change the schema](docs/usage.md#9-change-the-schema) - [Deploy a schema change](docs/usage.md#10-deploy-a-schema-change) |
-| test without writing a single mock | [Test](docs/usage.md#12-test) |
-| find out why it refused to start | [When it refuses](docs/usage.md#14-when-it-refuses) |
+| design the tables, and know what is *not* enforced | [Design the schema](docs/usage.md#2-design-the-schema) |
+| understand how this relates to a domain model | [How this differs from a domain model](docs/usage.md#3-how-this-differs-from-a-domain-model) |
+| write the queries my service asks | [Ask questions of it: arrows](docs/usage.md#5-ask-questions-of-it-arrows) |
+| put it behind HTTP | [Declare a route](docs/usage.md#7-declare-a-route) |
+| add a column without taking the service down | [Deploy a schema change](docs/usage.md#12-deploy-a-schema-change) |
+| test without writing a single mock | [Test](docs/usage.md#14-test) |
+| find out why it refused to start | [When it refuses](docs/usage.md#16-when-it-refuses) |
+
+Two things worth knowing before you design anything: every table's key is the attribute named `id`,
+and `DB.fk` declares a morphism in *your* schema rather than a `REFERENCES` constraint in the
+database. Both are explained where you meet them.
 
 The rest of this README says *why* the framework is shaped this way. The guide says how to work it.
 
