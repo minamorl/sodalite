@@ -241,6 +241,20 @@ original projects back out), `drop_attribute` is a projection and forgets. That 
 a statement runs. Both models carry the history and the conformance suite covers "migrate, then
 query".
 
+**The order is solved, not declared.** Each step says what names it requires, provides, and removes,
+and those solve into layers — so two branches that each appended a step merge without the index drift
+that an ordered ledger turns into a false fingerprint mismatch. The ledger is keyed by the step's
+content, and a contradiction (two steps supplying one name, a requirement nobody supplies, a cycle) is
+refused at declaration rather than at 3am.
+
+**Expansion is not reversibility.** `rename_attribute` is an isomorphism, so it rolls back perfectly,
+and it still breaks every process running the old code — the old presentation is not *included* in the
+new one under its own names. Reversibility asks for an inverse; compatibility asks for an inclusion.
+Only `create_table` and `add_attribute` are inclusions, which is what makes "is this release
+expansion-only?" a computed answer rather than a claim in a pull request. The application is one
+explicit command, boot verifies and refuses, and [the procedure](docs/migrations.md#the-procedure)
+says who runs what and when.
+
 Object storage gets the same treatment. A bucket is a partial function `Key ⇀ Object` whose keys form
 a poset under the prefix order, so `list(prefix)` is that order's principal filter — and there are no
 transactions, which the design states rather than hides:

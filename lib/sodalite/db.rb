@@ -113,7 +113,16 @@ module Sodalite
       end
     end
 
-    def capability(model)
+    # Given the history the application was written against, the model is asked
+    # at construction whether the database agrees — the same rule the router
+    # follows, that a check which can be made at boot is made at boot rather
+    # than on the one request that happens to exercise it.
+    #
+    # It refuses a database missing an expansion this code needs, and passes a
+    # database that has not yet had a contraction applied, because that is the
+    # normal state between deploying new code and dropping the old shape.
+    def capability(model, history: nil)
+      model.verify!(history) if history
       Capability.new(model: model)
     end
 

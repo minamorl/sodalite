@@ -14,10 +14,14 @@ require 'sodalite/store'
 require 'sodalite/openapi'
 
 module Service
-  SCHEMA = Sodalite::DB.schema(
-    users: { id: :integer, name: :string, city: :string },
-    posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
+  # The schema is not declared twice. The history is the declaration; the
+  # composite is what the routes are written against.
+  HISTORY = Sodalite::DB.history(
+    [:create_table, :users, { id: :integer, name: :string }],
+    [:add_attribute, :users, :city, :string, 'unknown'],
+    [:create_table, :posts, { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }]
   )
+  SCHEMA = HISTORY.schema
 
   # Named arrows. Not effects — values, built once and reused.
   BY_CITY = ->(city) { SCHEMA[:users].where(:city, city).order(:name) }
@@ -113,10 +117,10 @@ module Service
   # The whole assembly, in one place. Swap what `capabilities` and `world` are
   # and the same service runs against real infrastructure or against fixed
   # values — the routes do not know which.
-  def app(db: Sodalite::DB.memory(SCHEMA, SEED), objects: Sodalite::Store.memory, world: :fixed)
+  def app(db: Sodalite::DB.memory(HISTORY, SEED), objects: Sodalite::Store.memory, world: :fixed)
     Sodalite::App.build(
       routes: ROUTES,
-      capabilities: [Sodalite::DB.capability(db), Sodalite::Store.capability(objects)],
+      capabilities: [Sodalite::DB.capability(db, history: HISTORY), Sodalite::Store.capability(objects)],
       effects: { send_mail: ->(subject) { subject } },
       errors: ERRORS,
       world: world
