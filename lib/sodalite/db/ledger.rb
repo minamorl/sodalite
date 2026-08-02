@@ -27,7 +27,6 @@ module Sodalite
         self
       end
 
-      # rubocop:disable Naming/MethodParameterName -- `to:` is the public migration vocabulary.
       def rollback!(history, to:)
         with_lock do
           steps = ordered_steps(history)
@@ -38,7 +37,6 @@ module Sodalite
         end
         self
       end
-      # rubocop:enable Naming/MethodParameterName
 
       def verify!(history)
         steps = ordered_steps(history)
@@ -85,23 +83,16 @@ module Sodalite
 
       def verify_expansions!(declared, seen)
         missing = declared.reject { |fingerprint, _step| seen.key?(fingerprint) }
-                          .values.select { |step| expansion?(step) }
+                          .values.select(&:expand?)
         return if missing.empty?
 
         raise MigrationError, "database is missing required migrations: #{missing.join(', ')}"
       end
 
+      # The solved order, not the declaration order. Two branches that each
+      # appended a step merge into one set, and the set is what has meaning.
       def ordered_steps(history)
-        return history.plan.order if history.respond_to?(:plan)
-
-        history.steps # lane 2.1 合流までの足場
-      end
-
-      def expansion?(step)
-        return step.expand? if step.respond_to?(:expand?)
-
-        # lane 2.1 合流までの足場
-        !%i[drop_table drop_attribute].include?(step.kind)
+        history.plan.order
       end
 
       def with_lock

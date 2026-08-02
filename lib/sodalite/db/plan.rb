@@ -37,7 +37,9 @@ module Sodalite
         duplicate = steps.tally.find { |_step, count| count > 1 }&.first
         return unless duplicate
 
-        raise MigrationError, "#{duplicate} and #{duplicate} both provide the same names"
+        raise MigrationError,
+              "#{duplicate} is declared twice. A step is its content, so the two are one step, " \
+              'and a ledger keyed by content cannot tell them apart.'
       end
 
       def solve(steps)

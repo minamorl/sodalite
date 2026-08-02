@@ -220,7 +220,7 @@ module Sodalite
           "WHERE NOT EXISTS (SELECT 1 FROM #{MIGRATION_LOCK})", [token]
         )
         @connection.execute("SELECT token FROM #{MIGRATION_LOCK} WHERE id = 1", []).dig(0, 0) == token
-      end # rubocop:enable Naming/PredicateMethod
+      end
 
       def release_lock(token)
         ensure_lock!
