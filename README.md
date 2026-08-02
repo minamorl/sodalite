@@ -58,8 +58,8 @@ guide starts too.
 | find out why it refused to start | [When it refuses](docs/usage.md#16-when-it-refuses) |
 
 Two things worth knowing before you design anything: every table's key is the attribute named `id`,
-and `DB.fk` declares a morphism in *your* schema rather than a `REFERENCES` constraint in the
-database. Both are explained where you meet them.
+and a `DB.fk` column is typed by the key it points at and emitted as a real `REFERENCES` constraint —
+which SQLite parses but only enforces with `PRAGMA foreign_keys = ON`.
 
 The rest of this README says *why* the framework is shaped this way. The guide says how to work it.
 

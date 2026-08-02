@@ -61,16 +61,23 @@ module Sodalite
 
       def create_table(table)
         key = table.key
-        columns = table.fields.map { |field| [field, type_of(table, field)] }
+        columns = table.fields.map do |field|
+          [field, type_of(table, field), table.foreign_keys[field]]
+        end
         @db.create_table(table.name) do
-          columns.each { |field, type| column(field, type, primary_key: field == key) }
+          columns.each do |field, type, target|
+            if target
+              foreign_key(field, target, type: type)
+            else
+              column(field, type, primary_key: field == key)
+            end
+          end
         end
       end
 
       def type_of(table, field)
-        return Integer if table.foreign_keys.key?(field)
-
-        SQL_TYPES.fetch(table.attributes[field].to_s.delete_suffix('?').to_sym, String)
+        declared = table.foreign_keys.key?(field) ? table.fk_type(field) : table.attributes[field]
+        SQL_TYPES.fetch(declared.to_s.delete_suffix('?').to_sym, String)
       end
     end
   end

@@ -101,21 +101,28 @@ keys work — but the **name** is fixed, and there is no way to pass a different
 `DB.schema`. **Composite keys do not exist.** If your design needs one, give the table a synthetic
 `id` and enforce the pair elsewhere.
 
-### `DB.fk` is not a database constraint
-
-This is the one that will surprise you, so it is here rather than in a footnote:
+### A foreign key is a constraint, and carries the key's type
 
 ```ruby
 Sodalite::DB::SQL.create_table_statement(SCHEMA.table(:posts))
-# => "CREATE TABLE posts (id INTEGER PRIMARY KEY, author INTEGER)"
+# => "CREATE TABLE posts (id INTEGER PRIMARY KEY, author INTEGER REFERENCES users(id))"
 ```
 
-No `REFERENCES`. The generated DDL emits a bare column of the target's key type. `DB.fk` declares a
-morphism in *your* schema — it is what makes `follow(:author)` mean something and what types the
-column — and it does **not** ask the database to enforce anything.
+`DB.fk` declares a morphism `posts → users`, and that declaration does three things: it types the
+column with **the target's key type**, it emits a real `REFERENCES` constraint, and it makes
+`follow(:author)` mean something. If the target is keyed by a string, so is the column:
 
-What integrity means here instead: an instance of the schema is a functor, and a dangling foreign key
-is that functor failing to exist.
+```ruby
+Sodalite::DB.schema(users: { id: :string, … }, posts: { …, author: Sodalite::DB.fk(:users) })
+# => "CREATE TABLE posts (id INTEGER PRIMARY KEY, author TEXT REFERENCES users(id))"
+```
+
+**SQLite parses `REFERENCES` and does not enforce it unless the connection asks.** Run
+`PRAGMA foreign_keys = ON` on the connection you hand in; Postgres and MySQL need nothing. This is a
+property of the connection, which is yours, so the framework cannot set it for you.
+
+Why a constraint rather than a convention: an instance of the schema is a functor, and a dangling
+foreign key is that functor failing to exist.
 
 ```ruby
 model.insert(:posts, { id: 1, author: 99 })   # no user 99
@@ -125,15 +132,15 @@ model.violations  # => ["posts.author=99 has no users"]
 
 That is not "a bad row". The morphism `author : posts → users` has no value at that element, so the
 rows are not a functor at all. Referential integrity is not a rule imposed on rows; it is the
-condition for the instance to exist.
+condition for the instance to exist — which is why the database is asked to hold it rather than
+trusted to.
 
-**But `functor?` and `violations` are on the in-memory model only.** The SQL and Sequel models do not
-have them. So in production, nothing checks this for you unless you add the constraint to your database
-yourself, outside this DDL. Two honest options:
+`functor?` and `violations` are on the in-memory model only, so the *diagnosis* ("which row, pointing
+where") is a test-time affordance while the *enforcement* is the database's job.
 
-- Let the schema be the claim and check it in tests, where `DB.memory` can answer.
-- Add `REFERENCES` in your own migration tooling or by hand, and accept that the DDL sodalite generates
-  is not the whole story for your database.
+**Tables are created in dependency order**, not declaration order, because an inline `REFERENCES`
+needs its codomain to exist already. `schema.creation_order` is that order. A cycle of foreign keys
+cannot be linearised; those tables keep declaration order, and a strict database will reject them.
 
 ### What the DDL does not generate
 
@@ -687,6 +694,7 @@ the reason in hand.
 | --- | --- |
 | `SchemaError`: *has no key `:id`* | every table needs an attribute literally named `id`; the type is yours, the name is not |
 | `SchemaError`: *points at unknown table* | a `DB.fk` target that no table in the schema provides |
+| a constraint violation from the driver | a dangling foreign key reached the database. On SQLite this only appears with `PRAGMA foreign_keys = ON` |
 | `SchemaError`: *expected integer, got string* | a row did not fit the table's shape on insert |
 | `RouteError`: undeclared template parameter | `/users/:id` without `params: { id: … }`, or the reverse |
 | `Router::ConflictError` | two routes could answer one request, or `/users/:id` and `/users/:slug` disagree about what that segment is |
@@ -703,8 +711,7 @@ the reason in hand.
 | 500 with `contract` in the log | the response did not fit its declared schema under `Effects.real` |
 | 400 on `?page=` | an empty query value is present-and-empty, not absent |
 
-**Not implemented, on purpose or not yet:** database-level foreign key constraints, indexes, unique and
-check constraints, composite keys, declared headers, wildcard route segments, `functor?` on the SQL
-models, `Π_F` (folding two tables into one by a product over a shared key), an `empty_as_absent` decode
+**Not implemented, on purpose or not yet:** indexes, unique and check constraints, composite keys,
+cyclic foreign keys, declared headers, wildcard route segments, `functor?` on the SQL models, `Π_F` (folding two tables into one by a product over a shared key), an `empty_as_absent` decode
 option, RBS for a whole route, and durability — work that must survive a restart belongs in a durable
 engine, not here.

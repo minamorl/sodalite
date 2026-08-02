@@ -119,10 +119,16 @@ module Sodalite
          fields.map { |field| row[field] }]
       end
 
+      # A foreign key is emitted as a real constraint. `schema.rb` calls
+      # referential integrity the condition for an instance to be a functor
+      # rather than a rule about rows, and a database that lets the condition
+      # fail silently is one where the claim is not true.
       def create_table_statement(table)
         columns = table.fields.map do |field|
-          type = table.foreign_keys.key?(field) ? 'INTEGER' : sql_type(table.attributes[field])
-          "#{field} #{type}#{' PRIMARY KEY' if field == table.key}"
+          referenced = table.foreign_keys.key?(field)
+          type = sql_type(referenced ? table.fk_type(field) : table.attributes[field])
+          "#{field} #{type}#{' PRIMARY KEY' if field == table.key}" \
+            "#{" REFERENCES #{table.fk_reference(field)}" if referenced}"
         end
         "CREATE TABLE #{table.name} (#{columns.join(', ')})"
       end
@@ -151,8 +157,10 @@ module Sodalite
         @history = schema if schema.is_a?(History)
       end
 
+      # Dependency order, not declaration order: an inline `REFERENCES` needs its
+      # codomain to exist already.
       def create_tables!
-        @schema.tables.each_value { |table| @connection.execute(SQL.create_table_statement(table), []) }
+        @schema.creation_order.each { |table| @connection.execute(SQL.create_table_statement(table), []) }
         self
       end
 

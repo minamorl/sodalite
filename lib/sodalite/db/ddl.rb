@@ -63,8 +63,10 @@ module Sodalite
 
       def add_column(schema, table, field, default)
         definition = schema.table(table)
-        type = definition.foreign_keys.key?(field) ? 'INTEGER' : SQL.sql_type(definition.attributes[field])
-        statements = [["ALTER TABLE #{table} ADD COLUMN #{field} #{type}", []]]
+        referenced = definition.foreign_keys.key?(field)
+        type = SQL.sql_type(referenced ? definition.fk_type(field) : definition.attributes[field])
+        reference = referenced ? " REFERENCES #{definition.fk_reference(field)}" : ''
+        statements = [["ALTER TABLE #{table} ADD COLUMN #{field} #{type}#{reference}", []]]
         statements << ["UPDATE #{table} SET #{field} = ?", [default]] unless default.nil?
         statements
       end

@@ -39,8 +39,9 @@ module Sodalite
         @db = database
       end
 
+      # Dependency order, for the same reason the hand-written model needs it.
       def create_tables!
-        @schema.tables.each_value { |table| create_table(table) }
+        @schema.creation_order.each { |table| create_table(table) }
         self
       end
 
