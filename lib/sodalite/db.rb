@@ -4,6 +4,7 @@
 require_relative '../sodalite'
 
 require_relative 'db/address'
+require_relative 'db/writes'
 require_relative 'db/aggregate'
 require_relative 'db/schema'
 require_relative 'db/migration'
