@@ -159,8 +159,10 @@ Sodalite::DB.sql(HISTORY, connection, transactional_ddl: false).migrate!(HISTORY
 #    transactional DDL, ...
 ```
 
-The port is `execute(sql, binds) -> rows` and has nowhere to put the question, so
-the caller answers it once where the connection is built; `true` is the default
+The mandatory port is `execute(sql, binds) -> rows` and has nowhere to put the
+question — nor does the optional `change(sql, binds) -> Integer` a connection may
+also declare, which reports rows affected and not whether DDL rolls back. So the
+caller answers it once where the connection is built; `true` is the default
 because SQLite and Postgres both have it, and `DB.sequel` answers for itself.
 Without the scope, `carry` and `record_step` are two writes with a gap: an
 interruption between them leaves the database changed and the ledger silent, and
