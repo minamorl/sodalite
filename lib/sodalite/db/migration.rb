@@ -245,8 +245,18 @@ module Sodalite
         [table, *fields.keys.map { |field| attribute(table, field) }]
       end
 
+      # What a decomposition brings into being: the fibres `into` names, and
+      # their attributes. Nothing else — the whole resulting presentation had the
+      # step claim every object in the database, the ones other steps make
+      # included, so `Plan` read one name as supplied twice and refused to
+      # schedule any history holding a split beside another table. The fields
+      # come back out of `split`, because "the source's fields minus the tag" is
+      # what a fibre *is*, and a second spelling of it here is a second sentence
+      # that can drift from the first.
       def split_names(spec)
-        apply(spec).flat_map { |name, fields| names_for(name, fields) }
+        table, tag, into = args
+        decomposed = split(spec, table, tag, into)
+        into.values.map(&:to_sym).uniq.flat_map { |name| names_for(name, decomposed.fetch(name)) }
       end
 
       def provided_attribute(table, rest)
