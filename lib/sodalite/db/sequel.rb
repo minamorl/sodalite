@@ -140,28 +140,38 @@ module Sodalite
         row[table.key]
       end
 
-      # Naming the doomed rows by their keys needs the keys to be there, which is
-      # `deletable!`'s job: a projection has dropped them, and `where(key => [nil,
-      # nil])` then deletes nothing while the count says otherwise. So the arrow is
-      # checked before anything runs, and the count is the one the backend reports
-      # rather than the size of a set measured a statement earlier — between the
-      # two, another writer is a possibility, and the honest number is the one the
-      # `DELETE` actually did.
+      # One statement, with the guard inside it, which is the whole reason this
+      # operation exists. Reading a row and writing it back is atomic without
+      # being serialisable — under READ COMMITTED two scopes both read `stock =
+      # 1` and both write `0` — and what removes that is writing the new value as
+      # a function of the old one. So `:add` lowers to an expression the database
+      # computes and never to a value read into Ruby, and the engine applies it
+      # under its own row lock to whatever the value is by then. A negative delta
+      # is the decrement.
       #
-      # Reading the keys and deleting by them are two statements, so they are one
-      # scope. `atomically` joins an outer transaction rather than opening a
-      # second, which is what makes that safe to say here.
+      # The count is the one the `UPDATE` reports, for the same reason `delete`'s
+      # is: a count taken beforehand is the size of a set another writer may have
+      # moved since.
+      def update(query, changes, confirm_carrier: nil)
+        query.updatable!(changes, confirm_carrier: confirm_carrier)
+        guarded(query).update(assignments(changes))
+      end
+
+      # A deletion names rows of the carrier, so the arrow has to be a subobject
+      # of them — `deletable!`'s job, and it is asked before anything runs.
+      #
+      # The guard goes inside the `DELETE`, so there is no select before it and
+      # no scope holding two statements together, and the count is the one the
+      # statement reports rather than the size of a set measured before it: in
+      # between, another writer is a possibility, and the honest number is the
+      # one the `DELETE` did. That last part is what a real driver buys. The
+      # hand-written model reaches its database through `execute(sql, binds) ->
+      # rows`, which cannot say how many rows a statement affected, so it needs a
+      # widened port before it can have this shape at all — the difference
+      # between a backend and a one-method port, in one sentence.
       def delete(query, confirm_carrier: nil)
         query.deletable!(confirm_carrier: confirm_carrier)
-        table = @schema.table(query.carrier)
-        atomically do
-          keys = select(query).rows.map { |row| row[table.key] }
-          # An empty subobject is not a `DELETE` with an empty list; it is nothing
-          # to do.
-          next 0 if keys.empty?
-
-          @db[table.name].where(table.key => keys).delete
-        end
+        guarded(query).delete
       end
 
       # Same contract as the other two: the caller never asks for a rollback, it
@@ -293,6 +303,44 @@ module Sodalite
       def join_hop(dataset, hop)
         target, name, source, fk = hop
         dataset.join(::Sequel[target].as(name), @schema.table(target).key => column(source, fk))
+      end
+
+      # The rows an arrow names, as a dataset over the carrier's own table — the
+      # thing a `DELETE` or an `UPDATE` is issued against, guard included.
+      #
+      # An arrow that never joined is already a subobject of its carrier, so its
+      # own steps are the guard, replayed against a nil alias: a statement over
+      # one table has nothing to qualify against, and nil is how these two files
+      # already spell an unqualified column. The steps go back through `step`
+      # rather than through a second reading of them, so a comparison cannot mean
+      # one thing in a `SELECT` and another in an `UPDATE`.
+      #
+      # A join took its guard somewhere else — at the domain for a composition,
+      # along a path for a pullback — so there the rows are named by the image of
+      # the arrow on the key. Still one statement, and the guard is still
+      # evaluated when that statement runs rather than before it.
+      def guarded(query)
+        table = @schema.table(query.carrier)
+        joined = query.steps.any? { |kind, _| %i[follow pullback].include?(kind) }
+        return @db[table.name].where(table.key => dataset(query.select(table.key))) if joined
+
+        query.steps.reduce(@db[table.name]) do |rows, (kind, *rest)|
+          step(rows, [[table.name, nil]], kind, rest, query)
+        end
+      end
+
+      # `Change.ordered` is the one reading of a changes Hash, so declaration
+      # order is the order `SET` gets and the rule that a bare value means `:set`
+      # is not spelled a second time here.
+      #
+      # A `:set` is its operand. An `:add` is the column plus its operand, which
+      # is what makes the new value a function of the old one — and over a column
+      # that is nothing it is `NULL + delta`, so the value stays nothing. That is
+      # SQL's answer, arrived at by not asking for another one.
+      def assignments(changes)
+        Change.ordered(changes).to_h do |field, change|
+          [field, change.kind == :add ? column(nil, field) + change.operand : change.operand]
+        end
       end
 
       def distinct_values(table, field)

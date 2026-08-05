@@ -6,6 +6,11 @@ module Sodalite
     # everywhere else — the arrow, the fold, the presentation — spelled in
     # datasets instead of in SQL text, so a dialect that wants `OFFSET` written
     # differently gets it written differently without the meaning moving.
+    #
+    # A statement that changes rows is lowered from the same pieces — `step`,
+    # `condition`, `column` — because its guard *is* the arrow, and a second
+    # spelling of a comparison would be a second chance for one to mean something
+    # else. It is assembled next door, where the operations that issue it are.
     module SequelArrows
       private
 
@@ -119,11 +124,28 @@ module Sodalite
         function.as(aggregate.name)
       end
 
+      # A total order has to say where `nothing` goes, or the presentation is not
+      # a function of the set. `min`/`max` are monoids on `A + 1` with `nothing`
+      # adjoined as the identity, so a fibre that is entirely nothing folds to it
+      # and that result is then a thing to be ordered. Left to the backend there
+      # is no single answer to inherit: sqlite sorts nulls first and postgres
+      # sorts them last, so even the two SQL backends disagree with each other,
+      # which makes this a correctness question rather than a cost. So the
+      # placement is named here: `nothing` sorts **after** every element of A, in
+      # both directions. Not "last ascending, first descending"; after, both
+      # ways.
       def present(query, rows)
-        ordered = rows.order(*query.total_ordering.map do |ordering|
-          ordering.direction == :desc ? ::Sequel.desc(ordering.field) : ::Sequel.asc(ordering.field)
-        end)
+        ordered = rows.order(*query.total_ordering.map { |ordering| placed(ordering) })
         ordered.limit(query.limit_rows, query.offset_rows)
+      end
+
+      # Sequel spells the placement `nulls:` and emits it after the direction, so
+      # it is the same word on both — which is what "after, in both directions"
+      # comes out as: `DESC NULLS LAST` and `ASC NULLS LAST`.
+      def placed(ordering)
+        return ::Sequel.desc(ordering.field, nulls: :last) if ordering.direction == :desc
+
+        ::Sequel.asc(ordering.field, nulls: :last)
       end
 
       def fields_of(query, table_alias)
