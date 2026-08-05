@@ -28,8 +28,12 @@ module Sodalite
       triple(response.status, json, response.headers, head: head)
     end
 
-    def failure(status, code, message, violations: [], headers: {})
-      triple(status, ::JSON.generate(Errors.body(code, message, violations)), headers)
+    def failure(status, code, message, violations: [], headers: {}, route: nil)
+      json = ::JSON.generate(Errors.body(code, message, violations))
+      checked = check_error(route, status, json)
+      return checked if checked
+
+      triple(status, json, headers)
     end
 
     # A named domain failure maps to the status the app declared for it.
@@ -38,7 +42,7 @@ module Sodalite
     def workflow_error(route, result)
       status = @errors.fetch(result.code, 500)
       log_failure(route, result)
-      failure(status, result.code, status == 500 ? 'internal error' : result.message.to_s)
+      failure(status, result.code, status == 500 ? 'internal error' : result.message.to_s, route: route)
     end
 
     def breach(route, status, violations)
@@ -53,15 +57,23 @@ module Sodalite
 
     def check(route, status, json)
       schema = route.responses[status]
-      return nil unless schema
+      return undeclared_status(route, status) unless schema
 
       result = json.nil? ? missing_body : schema.parse(json)
+      result.ok? ? nil : breach(route, status, result.violations)
+    end
+
+    def check_error(route, status, json)
+      schema = route&.responses&.fetch(status, nil) || Errors::SCHEMA
+      result = schema.parse(json)
       result.ok? ? nil : breach(route, status, result.violations)
     end
 
     # The headers are already on the wire by the time a record is rejected, so
     # there is no status left to change. The stream stops, and it stops loudly.
     def stream(route, response)
+      return undeclared_status(route, response.status) unless route.responses.key?(response.status)
+
       body = StreamBody.new(response.stream, @performer) do |violations|
         @performer.perform(
           Effects::CONTRACT,
@@ -98,6 +110,10 @@ module Sodalite
 
     def no_response(route)
       breach(route, nil, [violation(:no_response, 'the route produced no response')])
+    end
+
+    def undeclared_status(route, status)
+      breach(route, status, [violation(:undeclared_status, "status #{status} is not declared by the route")])
     end
 
     def missing_body

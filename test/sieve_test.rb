@@ -106,6 +106,49 @@ class SieveTest < Minitest::Test
     assert_match(/no_response/, error.message)
   end
 
+  def test_a_response_with_an_undeclared_status_is_a_contract_breach
+    teapot = Berylx::Task[:teapot] do |lay|
+      lay[:response].set(Sodalite.respond(418, { whatever: 'x' }))
+    end
+    route = show_route(run: teapot)
+
+    error = assert_raises(Sodalite::Effects::ContractError) { app(route).call(env(:get, '/users/7')) }
+
+    assert_match(/undeclared_status/, error.message)
+  end
+
+  def test_an_undeclared_status_becomes_a_logged_500_in_the_real_world
+    require 'stringio'
+
+    io = StringIO.new
+    teapot = Berylx::Task[:teapot] do |lay|
+      lay[:response].set(Sodalite.respond(418, { whatever: 'x' }))
+    end
+    route = show_route(run: teapot)
+    triple = Sodalite::App.new(routes: [route], handlers: Sodalite::Effects.real(io: io))
+                          .call(env(:get, '/users/7'))
+
+    assert_equal 500, triple[0]
+    assert_includes io.string, 'undeclared_status'
+  end
+
+  def test_a_declared_error_shape_checks_the_error_body_the_framework_will_send
+    reject = Berylx::Task[:reject] { |lay| lay.reject(:missing, 'nope') }
+    route = show_route(responses: { 200 => { id: :integer }, 404 => { totally: :string } }, run: reject)
+    broken = app(route, errors: { missing: 404 })
+
+    error = assert_raises(Sodalite::Effects::ContractError) { broken.call(env(:get, '/users/7')) }
+
+    assert_match(%r{/totally}, error.message)
+  end
+
+  def test_a_framework_400_uses_the_framework_error_contract_when_the_route_does_not_declare_it
+    triple = app(show_route).call(env(:get, '/users/not-an-integer'))
+
+    assert_equal 400, triple[0]
+    assert_predicate Sodalite::Errors::SCHEMA.parse(triple[2].join), :ok?
+  end
+
   def test_the_error_body_fits_the_declared_error_schema
     triple = app(show_route).call(env(:get, '/users/abc'))
 

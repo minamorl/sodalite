@@ -129,6 +129,6 @@ class PumaTest < Minitest::Test
       )
     end
 
-    Sodalite::Route[:get, '/tail', run: tail]
+    Sodalite::Route[:get, '/tail', responses: { 200 => { seq: :integer } }, run: tail]
   end
 end

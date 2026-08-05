@@ -122,4 +122,21 @@ class SubstrateTest < Minitest::Test
     assert_equal 200, triple[0]
     assert_equal 14, json_body(triple)['id']
   end
+
+  def test_the_apps_handler_map_cannot_be_rewritten_after_boot
+    app = Sodalite::App.new(routes: [user_route], handlers: Sodalite::Effects.fixed(find_user))
+
+    assert_predicate app.handlers, :frozen?
+    assert_raises(FrozenError) { app.handlers[:find_user] = ->(_id) {} }
+  end
+
+  def test_handler_maps_and_maps_nested_inside_them_are_frozen
+    nested = { policy: { retries: 2 } }
+    handlers = Sodalite::Effects.fixed({ custom: nested })
+
+    assert_predicate handlers, :frozen?
+    assert_predicate handlers[:custom], :frozen?
+    assert_predicate handlers[:custom][:policy], :frozen?
+    assert_raises(FrozenError) { handlers[:custom][:policy][:retries] = 3 }
+  end
 end
