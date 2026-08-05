@@ -42,8 +42,7 @@ module Sodalite
 
     Query = Data.define(:schema, :root, :carrier, :steps, :unions, :grouping, :aggregates,
                         :havings, :orderings, :limit_rows, :offset_rows) do
-      include QueryChecks
-      include QueryPhases
+      include QueryChecks, QueryPhases, QueryReads
 
       def self.start(schema, root)
         new(schema: schema, root: root, carrier: root, steps: [].freeze, unions: [].freeze,
