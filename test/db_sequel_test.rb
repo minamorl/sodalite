@@ -165,21 +165,25 @@ class DBSequelTest < Minitest::Test
     assert_equal([12], @model.select(SCHEMA[:posts]).map { |row| row[:id] })
   end
 
-  # An empty subobject is not a `DELETE` with an empty list; it is nothing to do.
-  def test_an_empty_subobject_issues_no_delete_at_all
+  # An empty subobject is a statement that removes nothing, and there is nothing
+  # to notice about it beforehand: the count comes back from the `DELETE`, which
+  # is where a set that another writer may have moved gets measured.
+  def test_an_empty_subobject_is_a_delete_that_removes_nothing
     sql = logged { assert_equal 0, @model.delete(SCHEMA[:posts].where(:title, 'no such title')) }
 
-    refute_includes sql, 'DELETE FROM'
+    refute_includes sql, 'SELECT'
     assert_equal 3, @model.select(SCHEMA[:posts]).size
   end
 
-  # Reading the keys and deleting by them are two statements, so they are one
-  # scope — and `atomically` joining an outer transaction is what makes that safe
-  # to say from inside a model.
-  def test_reading_the_keys_and_deleting_by_them_is_one_scope
-    sql = logged { @model.delete(SCHEMA[:posts].where(:author, 1)) }
+  # The guard goes inside the `DELETE`, so there is no select before it and no
+  # scope holding two statements together. What used to need both was reading the
+  # keys, and a driver that reports affected rows is what makes that unnecessary.
+  def test_the_guard_goes_inside_the_delete_so_nothing_is_read_first
+    sql = logged { assert_equal 2, @model.delete(SCHEMA[:posts].where(:author, 1)) }
 
-    assert_match(/BEGIN.*SELECT.*DELETE FROM.*COMMIT/m, sql)
+    refute_includes sql, 'SELECT'
+    assert_equal 1, sql.lines.size
+    assert_includes sql, 'DELETE FROM `posts` WHERE (`author` = 1)'
   end
 
   # --- the fold -----------------------------------------------------------
