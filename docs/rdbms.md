@@ -312,6 +312,91 @@ The signature the code exports adds the scope, so it is five tags rather than fo
 (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `ATOMICALLY`) — and the fifth is the subject of the next
 section rather than a query at all.
 
+### 3.1 A fixed signature can still say what a write touches — as a calculus, not a channel
+
+What was asked for was a **push channel**: subscribe to a query, be told when a write invalidates it.
+The interesting thing about that request is that this framework's own design forbids it by
+construction, and the refusal is where the content is, so it belongs here rather than in a list of
+missing features.
+
+Three properties rule it out, and they are properties the rest of the framework is built out of: no
+global mutable state, per-request state confined to a single `Berylx::Root`, and an in-process
+lifetime. A registry of live subscriptions is precisely the negation of all three — it must outlive
+the request that registered a subscription, and it must be written by a *different* request when the
+write happens. There is nowhere for it to live that does not first undo something load-bearing.
+
+The streaming that does exist is not a counterexample, and the distinction is worth stating because
+the shapes look alike from outside. NDJSON and SSE here are a **response framing**: one request
+writing many records down its own connection, with its state inside its own `Root`. Nothing in it
+gives a second request a handle on the first one's socket. A framing is not a bus.
+
+So the framework offers the **calculus** and leaves the broker to whoever wants one. Two functions,
+both total on the values a caller already holds:
+
+```
+reads  : Query[A]        -> Set[Address]
+writes : (Tag, Payload)  -> Set[Address]
+```
+
+with one law, which is the entire reason the pair exists:
+
+> `writes(op) ∩ reads(q) = ∅`  ⟹  performing `op` cannot change `q`'s answer.
+
+**The two kinds of address are the two components of an instance.** An instance is a functor
+`I : C → Set`, and a functor has exactly two kinds of value: what it does to an object, and what it
+does to a morphism. That is the split, and it is not an implementation convenience:
+
+```
+elements(A)   the set I(A)
+field(A, f)   the function I(f) : I(A) → I(B)
+```
+
+Now each operation lands on one side of it, and the statement is structural rather than empirical.
+`INSERT` and `DELETE` change `I(A)` — which elements exist — and change no `I(f)` on the elements
+that were already there. `UPDATE` changes `I(f)` on some elements and **cannot** change `I(A)`: it
+takes a subobject and reassigns maps out of it, so no element appears and none disappears. So an
+update to `posts.title` cannot have changed the answer of a query reading only `posts.id`, and the
+compiler is not needed to see that. A foreign key and an attribute are one kind of thing here, both
+being morphisms out of the object — the split that matters is object-versus-morphism, not
+reference-versus-value, and a scheme addressed at the table has already lost it.
+
+**The rule that makes it sound.** A query with no projection answers with whole rows, so it reads
+*every* map out of its final carrier, including the ones nobody wrote down. Without that rule the
+calculus is unsound in the quiet direction: an update to an unmentioned column would look disjoint
+while changing the answer.
+
+**Why it stops at the column.** Fibre granularity — `posts.author=2` rather than `posts.author` —
+is strictly more precise. `where(:author, 1)` is genuinely unaffected when rows move from author 2 to
+author 3, and this calculus says it may be affected. It is refused because it is **not purely
+computable**: naming the fibres an `UPDATE` dirtied means knowing which fibres the matched rows were
+in before the write, which is a read — and read-then-write is the shape section 7.4 says `UPDATE`
+exists to remove. Nor need the guard be an equality: `where(:stock, :gte, 1)` names a subobject that
+is not a fibre of anything. So the approximation is one-sided on purpose. A false positive rebuilds
+what did not need rebuilding; a false negative serves a stale answer; the error is taken where it is
+only wasteful.
+
+**Why `ATOMICALLY` refuses rather than answers.** Its payload is a berylx task tree — the inspectable
+node the next section builds the scope out of — and what a task tree *performs* is not decidable from
+the value; that is precisely why the scope is a combinator whose handler runs the subtree rather than
+a query that can be read. The tempting answer is `∅`, and `∅` is a *claim*: that the scope dirties
+nothing. It is the one answer certainly wrong, so the function raises and tells the caller to union
+the writes of the operations it composed.
+
+**Why it is `(tag, payload)` and not a return value.** The alternative is to have the operations
+report what they dirtied, and that widens the fixed signature — the thing three models have to agree
+about, and the thing section 3 is entirely about not letting an application grow. Computing it from
+the payload the caller was about to perform means the theory gains a **function and no state**, and
+the question is askable before the write instead of after it.
+
+**Where it is scoped.** A schema is finitely presented, so query normalisation may rewrite a path
+using a declared equation, and `reads` then describes the path the query was normalised *to*. That is
+internally consistent — every model evaluates the normalised arrow, so the set matches the answer
+that was computed — but the normalised arrow means what the author wrote only on an instance that
+satisfies its equations. This is the standing section 1 already gives referential integrity:
+**reported, not enforced**, by `functor?` / `violations` / `equation_violations`. It is the honest
+scope of the law rather than a defect in it, and it is the same scope everything else in this
+document has.
+
 The payoff is in the next two sections, and it is the only reason to bother.
 
 ## 4. A transaction is a combinator handler, and rollback is what `Err` means to it
@@ -399,6 +484,13 @@ suite rather than in a nightly job somebody stops reading.
 - **No expression language in a change.** `:set` and `:add` are the two things a change may be, and a
   decrement is `add` of a negative delta rather than a second arrow. Widening that would be inventing
   a small language whose laws nobody stated, in three models that would then have to agree about it.
+- **No invalidation channel, and no cache.** A subscription registry outlives a request and is
+  written by another one, which is the global mutable state this framework does not have; a cache is
+  state the framework would then be holding on a caller's behalf, the same objection integrity
+  enforcement gets above. What is offered is section 3.1's calculus — `reads` and `writes`, two sets
+  and a `disjoint?` — and the broker is the caller's, built where its lifetime actually lives. The
+  approximation stops at the column rather than the fibre, because a finer answer cannot be computed
+  without a read.
 
 ## 7. Where the analogy breaks, said out loud
 

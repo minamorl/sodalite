@@ -527,6 +527,245 @@ maps `:boolean` to a type the driver can bind, and answers `transactional_ddl?` 
 being told. `DB.sql` is kept because three models checked against each other is a stronger claim than
 two, and because it is the only one that shows what the compilation actually is.
 
+### Deciding whether an answer went stale — a calculus, not a channel
+
+A cache wants to know one thing: *may this answer still be used?* The obvious shape for that is a
+push channel — subscribe to a query, get told when a write touches it. **This framework cannot have
+one, and the reason is the design rather than the schedule.** A registry of live subscriptions has to
+outlive the request that registered them and be written by a different request entirely, which is
+process-global mutable state; there is no `Sodalite.configure`, the app freezes itself at boot, and
+the only per-request state is one `Berylx::Root` that dies with the request. A subscription bus is
+exactly the thing those three properties are the absence of.
+
+The NDJSON and SSE streaming below is not that bus and should not be mistaken for it. A stream is a
+**response framing** — one request writing many records down its own connection, with its state
+inside its own `Root`. Nothing about it lets a *second* request reach the first one's socket.
+
+So what is offered is the calculus, and a broker built on it is yours. Two pure functions, both
+computed from values already in hand:
+
+```ruby
+DB = Sodalite::DB        # the shorthand every sample in this section is run under
+
+query.reads              # Set<Address> — the places this arrow's answer depends on
+DB.writes(tag, payload)  # Set<Address> — the places performing that operation dirties
+```
+
+with one property, and it is the whole point:
+
+> if `writes(op)` is disjoint from `reads(q)`, performing `op` cannot have changed `q`'s answer.
+
+Neither reads the database and neither remembers anything. `writes` takes exactly the `(tag, payload)`
+pair you were about to hand `io.perform`, so the question is askable *before* the operation runs.
+
+Both answer a frozen `Set`; every `# =>` below shows it as `to_a.sort`, because `Address` carries a
+total order so that one set has one rendering and two of them compare as text in a test failure.
+
+#### Two kinds of address, and why the split earns its keep
+
+```ruby
+DB::Address.elements(:posts)       # which elements the object has
+DB::Address.field(:posts, :title)  # where one map out of the object sends them
+```
+
+That split is the reason any of this is worth having. An insert or a delete changes **which elements
+exist** and nothing else. An update changes **where a map sends them** and cannot make an element
+appear or disappear. A foreign key and an attribute are the same kind of thing here — both are maps
+out of the object — so nothing about this is special-cased for references.
+
+```ruby
+DB.writes(DB::INSERT, [:posts, { id: 1, title: 'hello', author: 1 }])  # => [posts]
+DB.writes(DB::DELETE, SCHEMA[:posts].where(:id, 1))                    # => [posts]
+DB.writes(DB::UPDATE, [SCHEMA[:posts].where(:id, 1), { title: 'x' }])  # => [posts.title]
+DB.writes(DB::SELECT, SCHEMA[:posts])                                  # => []
+```
+
+An `INSERT` names the object's elements and *not* the fields the row filled in, which is tighter and
+still sound: every arrow over an object reads that object's elements, so naming them is enough. A
+`DELETE` names the elements of the **carrier**, not of the root — a delete through a composition
+removes elements of the codomain, which is the thing `confirm_carrier:` makes you say out loud. And
+an `UPDATE` names the fields the changes name and *not* the elements, so an update to `posts.title`
+leaves a query reading only `posts.id` alone. That is the case a scheme addressed at the table gets
+wrong, and the case that makes the calculus worth computing.
+
+#### The rule most easily missed: no projection means every field
+
+A query with no `select` answers with **whole rows**, so it reads every map out of its final carrier
+— including the ones nobody named:
+
+```ruby
+SCHEMA[:posts].select(:id).reads   # => [posts, posts.id]
+SCHEMA[:posts].reads               # => [posts, posts.author, posts.id, posts.title]
+```
+
+Without that rule the calculus is unsound: an update to a column the arrow never mentioned would look
+harmless while changing the answer it hands back. A fold has the same shape one layer on — a fold
+cannot follow a projection, so `group(:city).count(:people)` reads the whole row of `users` too.
+
+What contributes nothing is as deliberate. `having` names a fold's own output, which is computed here
+rather than stored, so there is no place in the instance for it to name; a window chooses how much of
+an order to hand back and consults no map to do it; an ordering on a fold's output names no place for
+the same reason `having` does not.
+
+```ruby
+plain = SCHEMA[:users].group(:city).count(:people)
+busy  = plain.having(:people, :gt, 1).order(:people, :desc).limit(3)
+plain.reads == busy.reads   # => true
+```
+
+#### Composition, pullback, and the object each step is spoken against
+
+`reads` walks the same steps the compiler walks, and agrees with it about the one thing that is easy
+to get backwards: which object a step is spoken against. `follow` is composition and moves the
+carrier; `where_at` emits the same join and leaves the carrier where it was.
+
+```ruby
+SCHEMA[:posts].follow(:author).select(:name).reads
+# => [posts, posts.author, users, users.name]
+SCHEMA[:posts].where_at(:author, :city, 'tokyo').select(:id).reads
+# => [posts, posts.author, posts.id, users, users.city]
+```
+
+Every object the walk touches contributes its elements — the root, the codomain of every composition,
+and every object a pullback path hops through. What a join reads of the object it lands on is that
+object's elements and the morphism that reached it, not the target's key that the `ON` clause names.
+That is sound rather than merely short: an update of a key is refused, so only an insert or a delete
+can move one, and both dirty that object's elements, which is already in the set.
+
+#### A worked example, end to end
+
+Against the `SCHEMA` from section 2, an index of the names that have posted:
+
+```ruby
+model = DB.memory(SCHEMA, users: [{ id: 1, name: 'mina', city: 'tokyo' }],
+                          posts: [{ id: 1, title: 'hello', author: 1 }])
+
+INDEX   = SCHEMA[:posts].follow(:author).select(:name)
+depends = INDEX.reads                          # => [posts, posts.author, users, users.name]
+cache   = {}
+fill    = -> { cache[:index] ||= model.select(INDEX).to_a }
+
+fill.call                                      # => [{ name: "mina" }]
+
+# a write that cannot have touched it
+retitle = [SCHEMA[:posts].where(:id, 1), { title: 'rewritten' }]
+DB.writes(DB::UPDATE, retitle)                 # => [posts.title]
+depends.disjoint?(DB.writes(DB::UPDATE, retitle))  # => true
+model.update(*retitle)
+fill.call                                      # => [{ name: "mina" }]   — still valid, not recomputed
+
+# a write that did
+rename = [SCHEMA[:users].where(:id, 1), { name: 'minamorl' }]
+DB.writes(DB::UPDATE, rename)                  # => [users.name]
+depends.disjoint?(DB.writes(DB::UPDATE, rename))   # => false
+cache.delete(:index)
+model.update(*rename)
+fill.call                                      # => [{ name: "minamorl" }]
+```
+
+An insert into `posts` meets it too, and through the other kind of address:
+
+```ruby
+insert = [:posts, { id: 2, title: 't', author: 1 }]
+DB.writes(DB::INSERT, insert)                  # => [posts]
+depends.disjoint?(DB.writes(DB::INSERT, insert))   # => false
+```
+
+`INDEX` starts at `posts`, so it reads the elements of `posts`, and an insert is exactly a change to
+which elements there are. The broker is those lines: a set, a `disjoint?`, and whatever storage you
+were already using.
+
+#### Why the granularity stops at the column
+
+Fibre granularity — `posts.author=2` rather than `posts.author` — would be strictly more precise.
+A query reading `where(:author, 1)` is genuinely not stale when an update moves rows from author 2 to
+author 3, and this calculus says it might be:
+
+```ruby
+mine = SCHEMA[:posts].where(:author, 1).select(:id)
+mine.reads                                                                # => [posts, posts.author, posts.id]
+moved = DB.writes(DB::UPDATE, [SCHEMA[:posts].where(:author, 2), { author: 3 }])
+moved                                                                     # => [posts.author]
+mine.reads.disjoint?(moved)                                               # => false
+# a false positive: no row of author 1 moved, and the calculus cannot see that
+```
+
+It is refused because it **cannot be computed purely**. Naming the fibres an update dirtied means
+knowing which fibres the matched rows were in *before* the write, and that is a read — read-then-write
+being the exact shape `UPDATE` exists to remove. And the guard need not be an equality at all:
+`where(:stock, :gte, 1)` names no fibre to be dirtied.
+
+So the false positives are accepted, deliberately and on one side. A false positive rebuilds something
+that did not need rebuilding; a false negative serves a stale answer. The error is taken on the side
+that is only wasteful.
+
+#### `ATOMICALLY` is refused, and specifically not answered with the empty set
+
+```ruby
+DB.writes(DB::ATOMICALLY, [:checkout, workflow])
+# => WritesError: a scope does not say what it writes — its payload is a berylx workflow, a task
+#    tree, and what a task tree performs is not decidable from the value; union the writes of the
+#    operations composed inside it, because the empty set would claim the scope dirties nothing and
+#    that is the one answer certainly wrong
+```
+
+A scope's payload is a task tree, and what a task tree performs is not a function of the value. The
+empty set would be a claim that the scope dirties nothing — the one answer certainly wrong — so it
+refuses instead. Union the writes of the operations you composed inside it. A tag that is not one of
+the five refuses for the same reason: nothing is known about it, and nothing known is not `[]`.
+
+#### Why it takes `(tag, payload)` rather than being a return value
+
+The other way to get this answer is to have the operations *report* what they dirtied. That widens
+the effect signature, which is fixed at five and is the thing three models agree about. Computing it
+from the same payload the caller was going to perform means the framework gains a **function and no
+state**, and the question can be asked before the write rather than after it.
+
+#### The limit, stated plainly
+
+A schema may be **finitely presented**, and query normalisation rewrites a path using a declared
+equation. `reads` then describes the path the query was normalised *to*:
+
+```ruby
+COMPANY = {
+  employees:   { id: :integer, name: :string, manager: DB.fk(:employees),
+                 department: DB.fk(:departments) },
+  departments: { id: :integer, title: :string }
+}
+PRESENTED = DB.schema(**COMPANY, equations: [[:employees, %i[manager department], %i[department]]])
+FREE      = DB.schema(**COMPANY)
+
+PRESENTED[:employees].follow(:manager).follow(:department).select(:title).reads
+# => [departments, departments.title, employees, employees.department]
+#    no employees.manager — the equation rewrote the path away
+FREE[:employees].follow(:manager).follow(:department).select(:title).reads
+# => [departments, departments.title, employees, employees.department, employees.manager]
+```
+
+That is consistent rather than broken: every model evaluates the **normalised** arrow, so the set
+describes exactly the answer that was computed. What scopes it is that the normalised arrow means
+what you wrote only on an instance that satisfies its declared equations. On one that does not, the
+two schemas above answer the same written query differently, and only the second is affected by an
+update to `manager`:
+
+```ruby
+seed = { employees:   [{ id: 1, name: 'a', manager: 2, department: 10 },
+                       { id: 2, name: 'b', manager: 2, department: 20 }],
+         departments: [{ id: 10, title: 'eng' }, { id: 20, title: 'ops' }] }
+
+DB.memory(PRESENTED, seed).equation_violations
+# => ["employees.id=1: manager.department = 20 but department = 10"]
+DB.memory(PRESENTED, seed).select(PRESENTED[:employees].follow(:manager).follow(:department).select(:title)).to_a
+# => [{ title: "eng" }, { title: "ops" }]
+DB.memory(FREE, seed).select(FREE[:employees].follow(:manager).follow(:department).select(:title)).to_a
+# => [{ title: "ops" }]
+```
+
+That is the standing referential integrity already has here — **reported, not enforced** — so the
+property holds for instances that are functors satisfying their equations, and `functor?` /
+`violations` / `equation_violations` are how you ask whether yours is one. Nothing about `reads`
+detects a violating instance on its own; it is a scoped claim rather than an unconditional one.
+
 ---
 
 # Part II — put it behind HTTP
@@ -1108,6 +1347,8 @@ the reason in hand.
 | `QueryError`: *needs a change* | an empty changes Hash, which is the identity |
 | `QueryError`: *is the identity of a row, not a value to reassign* | a change of the carrier's key |
 | `QueryError`: *carries no addition* | `DB.add` on a column whose type has no sum |
+| `WritesError`: *a scope does not say what it writes* | `ATOMICALLY` handed to `DB.writes`; what a task tree performs is not a function of its value, so union the operations inside it |
+| `WritesError`: *is not one of the five operations* | a tag `DB.writes` knows nothing about, and nothing known is not the empty set |
 | 500 with `contract` in the log | the response did not fit its declared schema under `Effects.real` |
 | 400 on `?page=` | an empty query value is present-and-empty, not absent |
 
@@ -1133,5 +1374,6 @@ the timestamp are what the running process wrote; the wording around them is ver
 **Not implemented, on purpose or not yet:** database-level foreign key constraints, unique and check
 constraints, indexes beyond the one each foreign key column gets, composite keys, declared headers,
 wildcard route segments, `Π_F` (folding two tables into one by a product over a shared key), an
-`empty_as_absent` decode option, RBS for a whole route, and durability — work that must survive a
-restart belongs in a durable engine, not here.
+`empty_as_absent` decode option, RBS for a whole route, a cache or an invalidation *channel* (the
+calculus is offered, the broker is yours — see "Deciding whether an answer went stale" above), and
+durability — work that must survive a restart belongs in a durable engine, not here.

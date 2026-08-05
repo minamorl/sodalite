@@ -173,8 +173,16 @@ carries a law.** It is the same rule that keeps `avg` out of the aggregates for 
 for being `add` of a negative. A sixth operation would need the same argument, and "a caller would
 find it convenient" is not that argument.
 
-Two more decisions there are design-level rather than API-level, and both belong in this document
-because both are choices about what the framework will and will not hold for you:
+The rule cuts the other way too, and the invalidation surface is where it did. What was asked for
+there was a push channel — subscribe to a query, be told when a write dirties it. What carries a law
+is not the channel; it is the pair of sets underneath it, and the law is one line: if the places an
+operation dirties are disjoint from the places an answer depends on, that operation cannot have
+changed that answer. So the sets are what shipped, as two pure functions, and the channel is
+somebody's to build on top. That is not a smaller version of the request. It is the part of it that
+is true independently of who is holding the sockets.
+
+Three more decisions there are design-level rather than API-level, and all three belong in this
+document because all three are choices about what the framework will and will not hold for you:
 
 - **Integrity is reported, not enforced.** An instance is a functor into `Set`, so a dangling foreign
   key is a failure to be a functor rather than a bad row — but `insert` does not check it, `delete`
@@ -185,6 +193,16 @@ because both are choices about what the framework will and will not hold for you
 - **The ledger is the truth about what a database is.** `verify!` reads it and nothing else, so a
   database someone hand-altered passes, and a history cannot adopt a database it did not create. That
   is one truth that can be wrong rather than two that disagree about which of them is.
+- **Invalidation is a calculus, not a channel.** `query.reads` and `DB.writes(tag, payload)` each
+  answer a set of addresses, and a caller decides staleness by asking whether the two meet. There is
+  no subscription registry and no cache, because a registry must outlive the request that registered
+  it and be written by a *different* request — exactly the global mutable state "No global state"
+  above rules out — and a cache would be state the framework holds on a caller's behalf, which is the
+  objection integrity enforcement gets. Both functions are computed from values already in hand: an
+  arrow, and the `(tag, payload)` the caller was about to perform. So the framework gains a function
+  and no state, and the question becomes askable before the write rather than after it. [The RDBMS
+  note](rdbms.md) section 3.1 works out the two kinds of address, why the precision stops at the
+  column, and why a scope refuses to answer at all.
 
 ## Streaming, because the sieve already reads streams
 
@@ -203,6 +221,13 @@ after the whole body was generated. The status line is already on the wire by th
 status left to change: the stream stops at that record and reports through the same contract handler.
 An LLM proxy, a log tail, and a change feed are the same shape, and `Zeolite.feed` reads back what
 this wrote.
+
+**A stream is a response framing, not a broadcast bus**, and the two are worth telling apart because
+from outside they look alike. A stream is one request writing many records down its own connection,
+with its state inside its own `Root` and its lifetime ending with the request. Nothing in it gives a
+*second* request a handle on the first one's socket, so it is not the substrate a subscription
+channel would be built on — which is why the invalidation surface above is a pair of sets rather than
+a feed.
 
 ## Concurrency
 
