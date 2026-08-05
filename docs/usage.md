@@ -87,6 +87,13 @@ integrity rule below is not arbitrary.
 nested hashes, `Zeolite.enum(:draft, :published)` for a closed set, and refinements such as
 `Zeolite.sized(:string, min: 1, max: 64)`. A trailing `?` (`:integer?`) makes the field nullable.
 
+**`:boolean` does not work with `DB.sql`.** `sql_type` has no boolean, so the column is declared
+`TEXT`, and the sqlite3 driver refuses to bind `true` at all — `RuntimeError: can't prepare
+TrueClass`, on the insert rather than at construction. `DB.memory` and `DB.sequel` both take it,
+because one stores Ruby values and the other lets a backend that knows its dialect do the mapping.
+This is not new and it is not a plan; it is where the hand-written emitter stops, and the way around
+it is to use `DB.sequel` or to spell the field as an enum of two strings.
+
 Now the constraints you need before you design anything, because they are not negotiable:
 
 ### Every table has a key named `id`
@@ -107,7 +114,7 @@ This is the one that will surprise you, so it is here rather than in a footnote:
 
 ```ruby
 Sodalite::DB::SQL.create_table_statement(SCHEMA.table(:posts))
-# => "CREATE TABLE posts (id INTEGER PRIMARY KEY, author INTEGER)"
+# => "CREATE TABLE \"posts\" (\"id\" INTEGER PRIMARY KEY, \"title\" TEXT, \"author\" INTEGER)"
 ```
 
 No `REFERENCES`. The generated DDL emits a bare column of the target's key type. `DB.fk` declares a
@@ -118,7 +125,7 @@ What integrity means here instead: an instance of the schema is a functor, and a
 is that functor failing to exist.
 
 ```ruby
-model.insert(:posts, { id: 1, author: 99 })   # no user 99
+model.insert(:posts, { id: 1, title: 'hi', author: 99 })   # no user 99
 model.functor?    # => false
 model.violations  # => ["posts.author=99 has no users"]
 ```
@@ -127,19 +134,116 @@ That is not "a bad row". The morphism `author : posts → users` has no value at
 rows are not a functor at all. Referential integrity is not a rule imposed on rows; it is the
 condition for the instance to exist.
 
-**But `functor?` and `violations` are on the in-memory model only.** The SQL and Sequel models do not
-have them. So in production, nothing checks this for you unless you add the constraint to your database
-yourself, outside this DDL. Two honest options:
+`functor?` and `violations` are on **all three models** — `DB.memory` intersects sets, `DB.sql` and
+`DB.sequel` each ask the database for the anti-join in one statement — and the sentence they answer
+with comes from the schema, so three models cannot report one broken morphism in three wordings. All
+three sort on that sentence, so the list is comparable across models rather than across key types that
+need not be comparable to each other.
 
-- Let the schema be the claim and check it in tests, where `DB.memory` can answer.
-- Add `REFERENCES` in your own migration tooling or by hand, and accept that the DDL sodalite generates
-  is not the whole story for your database.
+**`violations` counts per element, not per missing key.** Two posts pointing at the absent user 99 are
+two failures of the functor and not one, so `violations.size` is `2` and the sentence appears twice.
+The morphism fails to have a value *at an element*, and the multiplicity is what "how far from being a
+functor" means — deduplicating it would answer a different question.
 
-### What the DDL does not generate
+### Referential integrity is a diagnostic, not an invariant
 
-No indexes. No unique constraints. No check constraints. No cascade — `DELETE` removes rows of the
-query's own table and nothing else. `create_table` gives you columns and a primary key, and everything
-else is yours.
+This is the decision, and it is worth stating rather than leaving you to infer it from the absence of
+an error:
+
+- `insert` does not check that a foreign key's target exists.
+- `delete` does not check whether anything points at the row it removes.
+- The DDL emits no `REFERENCES`, so the database will not check either.
+
+So an instance can stop being a functor between two writes, and nothing stops it. `functor?` is how
+you ask, when you ask. Guarding the writes instead would impose a constraint the schema does not
+declare, and would turn something an instance *is* into something a model enforces on its behalf —
+which is a different object, and a slower one.
+
+What follows from that, practically: assert `functor?` in tests, where it costs nothing and a
+dangling key fails the suite. In production it is a query you run when you want the answer, not a
+guarantee you inherit. If you want the database to hold the line, add `REFERENCES` yourself and
+accept that the DDL sodalite generates is then not the whole story for your database.
+
+### Path equations, the constraint a foreign key cannot carry
+
+A schema is a **finitely presented** category, and `equations:` is the presentation's other half:
+pairs of composites out of one object, declared equal.
+
+```ruby
+PRESENTED = Sodalite::DB.schema(
+  employees:   { id: :integer, name: :string, manager: Sodalite::DB.fk(:employees),
+                 department: Sodalite::DB.fk(:departments) },
+  departments: { id: :integer, title: :string },
+  equations:   [[:employees, %i[manager department], %i[department]]]
+)
+# every employee is in their manager's department
+```
+
+Declare none and the schema is the *free* category on the graph of foreign keys, where no two
+distinct paths are ever equal — which is what every schema was before this, so leaving `equations:`
+off changes nothing. A foreign key relates one column to one key, never one path to another, so this
+constraint has nowhere to live in the DDL either.
+
+An equation is judged the moment it is declared. Sides that arrive at different objects, a morphism
+that does not exist, a source table that does not — each is a `SchemaError` at construction, because
+an equation about morphisms that are not there is not a constraint that fails later, it is a sentence
+about some other category. The empty path is allowed and means the identity: `[:employees, %i[manager],
+[]]` says every employee is their own manager.
+
+It buys two things. The first is the constraint itself, reported the same way integrity is:
+
+```ruby
+model.satisfies_equations?  # => false
+model.equation_violations   # => ["employees.id=3: manager.department = 1 but department = 2"]
+```
+
+Reported, not enforced, for the same reason and with the same standing. `insert` does not check it
+and no `CHECK` is emitted.
+
+The second is a query normalisation **derived from the schema rather than guessed at** — no
+statistics, no hints, no data read. A trailing run of compositions is rewritten to the shortest path
+the equations prove equal to it, so under `PRESENTED` this
+
+```ruby
+PRESENTED[:employees].follow(:manager).follow(:department)
+```
+
+compiles to one join instead of two:
+
+```sql
+SELECT DISTINCT "t1"."id", "t1"."title" FROM "employees" "t0"
+JOIN "departments" "t1" ON "t0"."department" = "t1"."id"
+```
+
+**The caveat, plainly: the rewrite is sound relative to the *declared theory*, which is weaker than
+sound.** An instance that violates the equation answers differently after the rewrite than it would
+have before. So does one where a morphism on the longer path has no value at some element, because
+the longer path drops that element and the shorter one keeps it. That is the exact standing of a
+dangling foreign key — a failure to be a functor into the presented category — and it is the same
+bargain: the presentation is believed, `equation_violations` is what tells you the instance stopped
+deserving it.
+
+### What the DDL does generate, and what it does not
+
+**Foreign key columns are indexed.** `follow` and the pullback both compile to `JOIN target ON
+source.fk = target.key`, so a morphism's column sits on the probe side of a join by construction —
+the index follows from declaring the morphism rather than from a slow morning afterwards. It is named
+`index_<table>_on_<field>` by one rule that both SQL-backed models read, so they cannot disagree
+about what an index is called, and it is emitted on creation *and* carried across a `rename_table` —
+which matters because SQLite and Postgres both keep an index across `RENAME TO` under the name it was
+created with, leaving the renamed object holding a name nothing can compute again. (`DB.memory` has
+no DDL and therefore no indexes; there is nothing there for one to speed up.)
+
+```ruby
+Sodalite::DB::SQL.index_statements(SCHEMA.table(:posts))
+# => [["CREATE INDEX \"index_posts_on_author\" ON \"posts\" (\"author\")", []]]
+```
+
+Nothing else. No index you declare yourself — there is no vocabulary for one, because an index that
+does not follow from an arrow would be tuning, and tuning is not a presentation. No unique
+constraints, no check constraints, no cascade — `DELETE` removes rows of the query's own table and
+nothing else. `create_table` gives you columns, a primary key, and the indexes your morphisms asked
+for; everything else is yours.
 
 ### What *is* checked, at construction
 
@@ -179,7 +283,7 @@ the key.
 | --- | --- |
 | entities with behavior — `user.suspend!` | rows are Hashes; behavior is a named berylx task |
 | aggregates defining a consistency boundary | no aggregates — the boundary is `DB.atomically` around a workflow you name |
-| repositories | four verbs, and a "finder" is a **value**: `BY_CITY = ->(c) { SCHEMA[:users].where(:city, c) }` |
+| repositories | five operations, and a "finder" is a **value**: `BY_CITY = ->(c) { SCHEMA[:users].where(:city, c) }` |
 | invariants enforced inside the model | shape enforced by the schema; domain rules live in tasks that `reject` |
 | a lifecycle or state machine per entity | a berylx workflow; `branch` is the case analysis |
 | ubiquitous language expressed as classes | expressed in the names of tables, arrows, and tasks |
@@ -247,21 +351,62 @@ bundle exec ruby -Ilib examples/service/migrate.rb plan
 
 ```
 layer 0: create_table(:users, {:id=>:integer, :name=>:string})
-layer 1: create_table(:posts, {...}), add_attribute(:users, :city, :string, "unknown")
+layer 1: add_attribute(:users, :city, :string, "unknown"), create_table(:posts, {:id=>:integer, :title=>:string, :author=>#<data Sodalite::DB::FK target=:users>})
 expansion-only: true
 ```
 
 `create_table :posts` is declared *last* and lands in layer 1 beside `add_attribute`, because the two
 are independent and both need only `users`. Two branches that each appended a step therefore merge
-without ceremony: the declaration order changed, the set did not.
+without ceremony: the declaration order changed, the set did not. Inside a layer the steps are sorted
+by fingerprint, which is why `add_attribute` prints first — a tie-break that is a function of content
+means two runners flatten the same layers into the same order.
 
 Contradictions are refused at declaration — two steps supplying one name, a requirement nobody
 supplies, a cycle, or the same step declared twice. Reversibility is computed rather than promised:
 
 ```ruby
-HISTORY.reversible_to?(0)    # => true
-HISTORY.irreversible_steps   # => [] — a drop would appear here
+HISTORY.reversible_after?(0)   # => true
+HISTORY.irreversible_steps     # => [] — a drop would appear here
 ```
+
+`after` is a count of steps along `plan.order`, the solved order — the same number line
+`rollback!(to:)` indexes, so the two cannot disagree about which prefix of the history a number
+names. `schema_after` and `spec_after` read it the same way.
+
+### A history cannot adopt a database it did not create
+
+Every step declares what it requires, and the solver refuses a history whose requirements nobody
+supplies:
+
+```ruby
+Sodalite::DB.history([:add_attribute, :users, :city, :string, 'unknown'])
+# => MigrationError: requirements [:users] are not provided for
+#    add_attribute(:users, :city, :string, "unknown")
+```
+
+So the first steps of any history are always the `create_table`s that bring every object into being.
+There is no road from a database sodalite did not create — no `assume_table`, no baseline step, no
+way to declare "this already exists". That is a design decision and not an oversight: a step that
+asserted an object was already there would be a step whose meaning depends on the database rather
+than on the history, and the whole ledger is built on the other premise. Adopting an existing
+database means writing the history that would have produced it and seeding the ledger by hand.
+
+### Two ordering defects, both one layer below the solver
+
+The solved order is not the whole story. Two things are still read in **declaration** order, and both
+raise where the solved order would have been fine:
+
+- **`History` bootstraps its presentations by declaring them in sequence.** `Plan` needs a
+  presentation per step *before* any order exists, so that one fold runs in declaration order. A
+  `rename_table` or `split_table` written *before* the step that creates the object it operates on
+  raises `KeyError: key not found: :users` at construction. Declare the creation first and it is
+  fine. Ordinary steps are unaffected — `add_attribute` before the `create_table` of an unrelated
+  table is exactly the case the solver exists for.
+- **`merge_tables` claims its target with a wildcard.** It provides `people.*` rather than the fields
+  it actually produces, so a later step that supplies a *new* name under the merged object cannot be
+  scheduled: `merge_tables` then `add_attribute` on the merged table is refused as a
+  `migration dependency cycle`. Adding the attribute to *both sources first* and then merging works,
+  and is the same migration.
 
 ## 5. Ask questions of it: arrows
 
@@ -274,9 +419,10 @@ BUSIEST = SCHEMA[:posts].follow(:author).group(:city).count(:people).order(:peop
 ```
 
 Vocabulary: `where`, `where_null` / `where_present`, order comparisons where the attribute type carries
-an order, `follow(:fk)` to compose along a foreign key, `group(...).count(...)` / `sum` / `min` / `max`,
-`having` (a subobject of the *grouped* relation, which is why it is a different word rather than an
-overload), `order(field, :asc | :desc)`, `limit` / `offset`, and `union`.
+an order, `follow(:fk)` to compose along a foreign key, `where_at` / `where_along` to filter along one
+without following it, `group(...).count(...)` / `sum` / `min` / `max`, `having` (a subobject of the
+*grouped* relation, which is why it is a different word rather than an overload),
+`order(field, :asc | :desc)`, `limit` / `offset`, and `union`.
 
 Comparing to `nil` is refused in every form, because SQL's answer to `x = NULL` is UNKNOWN. Say
 `where_null` or `where_present` and mean it.
@@ -284,29 +430,102 @@ Comparing to `nil` is refused in every form, because SQL's answer to `x = NULL` 
 An unordered result is a **set** (`Relation`); an ordered one is a **sequence** (`Listing`). The
 distinction is kept because it is real.
 
+**`nothing` sorts after every element, in both directions.** An order has to be a function of the set,
+and a nullable column carries the adjoined point outright — `min`/`max` fold a fibre that is entirely
+nothing to it, so an ordering can meet a value no `?` in the schema mentioned. The backends had three
+answers there and none of them was about cost: `DB.memory` raised, sqlite sorted nothings first,
+postgres sorted them last. So the placement is stated rather than inherited, and it is *not* last
+ascending and first descending — `nothing` is not an element being ordered, it is the point adjoined to
+`A`, so reversing the order on `A` cannot move it.
+
+```ruby
+PLAYERS = Sodalite::DB.schema(players: { id: :integer, name: :string, score: :integer? })
+# scores 5, 9, and one player who has none — the same two lines in all three models
+model.select(PLAYERS[:players].order(:score)).map { |row| row[:score] }        # => [5, 9, nil]
+model.select(PLAYERS[:players].order(:score, :desc)).map { |row| row[:score] } # => [9, 5, nil]
+```
+
+Both SQL models say it as `NULLS LAST` on every ordering term, which needs **SQLite 3.30 or newer**.
+It is also what keeps a window meaning something: `order(:score, :desc).limit(3)` is the three largest
+scores, not a presentation of three absences of one.
+
+### `follow` moves the carrier; `where_at` does not
+
+The question "which posts were written by someone in tokyo?" cannot be asked with `follow`, and the
+reason is structural rather than a missing feature. `follow` is composition, so it moves the carrier
+to the codomain: what comes back is *users*, and the posts were the thing being asked about.
+
+```ruby
+SCHEMA[:posts].follow(:author).where(:city, 'tokyo')   # => users
+SCHEMA[:posts].where_at(:author, :city, 'tokyo')       # => posts
+```
+
+`where_at(path, field, …)` is the pullback. For a morphism `f : posts → users` and a subobject `S` of
+users, `f*(S)` is a subobject of *posts* — the elements whose image under `f` lands in `S`. It emits
+the same `JOIN` a composition emits and leaves the carrier where it was; which side of the span you
+read is the whole difference. `where_along(%i[post author], …)` does the same along a path of more
+than one hop.
+
+It is `where` formed along a path, not a fourth primitive — phase one is still composition,
+subobject, image. **An element whose morphism has no value is dropped**, in all three models: the
+join has no row for it, so it is not in the subobject. That element is not silently lost, it is
+already reported by `violations` as the dangling key it is.
+
 Composition folds correctly, which is the part hand-written SQL usually gets wrong:
 
 ```sql
-SELECT g.city, COUNT(*) AS people
-FROM (SELECT DISTINCT t1.id, t1.city FROM posts t0 JOIN users t1 ON t0.author = t1.id) g
-GROUP BY g.city
+SELECT "g"."city", COUNT(*) AS "people"
+FROM (SELECT DISTINCT "t1"."id", "t1"."name", "t1"."city"
+      FROM "posts" "t0" JOIN "users" "t1" ON "t0"."author" = "t1"."id") "g"
+GROUP BY "g"."city"
 ```
 
 The subquery is the image of the composite. Without it the count would report multiplicities of the
 join rather than elements of the image — two different numbers, and only one of them answers "how many
 people".
 
-Three models satisfy the same four verbs:
+Three models satisfy the same five operations:
 
 ```ruby
 Sodalite::DB.memory(SCHEMA, seed)              # rows in Hashes, no database
 Sodalite::DB.sql(SCHEMA, connection)           # anything answering execute(sql, binds)
-Sodalite::DB.sequel(SCHEMA, Sequel.connect(…)) # dialects, quoting, pooling
+Sodalite::DB.sequel(SCHEMA, Sequel.connect(…)) # dialects, pooling, type mapping
 ```
 
 They are checked against each other, which is what makes the in-memory one usable as the thing your
-tests run against rather than a stub returning what a test author decided. **Prefer `DB.sequel` in
-production**: it quotes identifiers (a table called `order` works) and spells each dialect correctly.
+tests run against rather than a stub returning what a test author decided.
+
+**The mandatory port is still one method.** `execute(sql, binds) -> rows` is the whole of what
+`DB.sql` requires, the gem depends on no driver, and every adapter written against it keeps working. A
+connection may *also* answer `change(sql, binds) -> Integer` — how many rows the statement affected —
+and `DB.sql` asks with `respond_to?` rather than taking a flag, so declaring it is a capability rather
+than a requirement and there is nothing for a caller to get wrong. Where it is declared, a change or a
+deletion is one statement:
+
+```ruby
+def change(sql, binds) = (execute(sql, binds); @db.changes)
+```
+
+```
+# execute only                          # execute + change
+BEGIN                                   UPDATE "items" SET "stock" = "stock" + ? WHERE "stock" > ?
+SELECT COUNT(*) FROM "items" WHERE …
+UPDATE "items" SET "stock" = …
+COMMIT
+```
+
+Both answer `2`. Without `change` the count has to be *measured*, and measured before the statement,
+because a change moves rows out of the subobject that named them — `stock = stock - 1` under
+`stock > 0` is exactly that — with both readings in one scope so nothing can move a row between them.
+A deletion is the same trade: with `change` it is one `DELETE` carrying the guard and no doomed row is
+read at all; without it, the keys go out chunked and what left is measured against them.
+
+**Prefer `DB.sequel` in production.** Both SQL models quote every identifier they emit, so a table
+called `order` works in either; what is left is what a backend is for. Sequel spells `OFFSET` without
+`LIMIT` per dialect rather than as one integer both accept, hands the driver its own placeholders,
+maps `:boolean` to a type the driver can bind, and answers `transactional_ddl?` for itself instead of
+being told. `DB.sql` is kept because three models checked against each other is a stronger claim than
+two, and because it is the only one that shows what the compilation actually is.
 
 ---
 
@@ -317,10 +536,11 @@ production**: it quotes identifiers (a table called `order` works) and spells ea
 The database is not a set of invented verbs. The signature is fixed and small:
 
 ```
-SELECT(query)       -> Relation
-INSERT(table, row)  -> key
-DELETE(query)       -> count
-ATOMICALLY(subtree) -> Ok / Err
+SELECT(query)          -> Relation
+INSERT(table, row)     -> key
+UPDATE(query, changes) -> count
+DELETE(query)          -> count
+ATOMICALLY(subtree)    -> Ok / Err
 ```
 
 so a task asks for what it wants by tag, and the handler map decides what answers:
@@ -331,6 +551,94 @@ load_user = Berylx::Task[:load_user] do |lay, io|
   found.empty? ? lay.reject(:not_found, 'no such user') : lay[:user].set(found.rows.first)
 end
 ```
+
+### Changing a value is `UPDATE`, and the reason is not convenience
+
+Four operations can already change a value: `SELECT` the row, `DELETE` it, `INSERT` the changed
+version, inside `atomically`. That is atomic, and atomic is not enough. A plain `BEGIN` on postgres is
+READ COMMITTED, so two scopes both read `stock = 1`; the second's `DELETE` blocks until the first
+commits, then re-evaluates its `WHERE` against a row that is already gone, removes nothing, and inserts
+a row computed from the read it took before any of that happened. One decrement is lost and the item is
+oversold.
+
+A fifth operation that only assigned literals would carry the same hazard, because the hazard is not
+the number of statements — it is where the new value came from. `SET stock = 0` computed that `0` from
+a read taken earlier, and the row it lands on need not be the row that was read. What removes it is
+writing the change as a **function of the current value**, with the guard evaluated **inside the same
+statement**:
+
+```ruby
+SHOP = Sodalite::DB.schema(
+  items:  { id: :integer, name: :string, stock: :integer },
+  orders: { id: :integer, item: Sodalite::DB.fk(:items) }
+)
+IN_STOCK = ->(id) { SHOP[:items].where(:id, id).where(:stock, :gt, 0) }
+
+reserve = Berylx::Task[:reserve] do |lay, io|
+  taken = io.perform(Sodalite::DB::UPDATE,
+                     [IN_STOCK.call(lay[:item].get), { stock: Sodalite::DB.add(-1) }])
+  taken.zero? ? lay.reject(:sold_out, 'nothing left to reserve') : lay[:taken].set(taken)
+end
+```
+
+Run twice against one unit of stock — the same two lines from `DB.memory` and from `DB.sql`:
+
+```
+Ok  taken=1
+Err sold_out: nothing left to reserve
+```
+
+```sql
+UPDATE "items" SET "stock" = "stock" + ? WHERE "id" = ? AND "stock" > ?
+```
+
+The `0` is the point. A caller learns it lost the race *from the count*, rather than by reading the row
+back and finding stock below zero. The engine evaluates `stock > 0` while it holds the row and computes
+`stock + (-1)` from whatever the value is by then, so there is no earlier read for either scope to have
+acted on. The arrow never sees the value, which is what leaves nothing for it to have seen too early.
+(`DB.memory` reaches the same place by a different route — it names the rows and applies the change
+under one monitor — which is why the two print the same two lines.)
+
+**The vocabulary is closed.** `DB.add(delta)` and `DB.set(value)`, and a bare value in the changes Hash
+means `:set` — `{ state: 'sold' }` and `{ state: DB.set('sold') }` are one change. There is no
+`subtract`: a decrement is `add` of a negative delta, which leaves one operation to check, one to
+compile, and one for three models to agree about. It is deliberately not an expression language, on the
+rule that kept `avg` out of the aggregates — what is offered is what carries a law.
+
+**What an update refuses**, all of it when the call is made and before any statement is emitted:
+
+| refusal | why |
+| --- | --- |
+| everything a deletion refuses — a projection, a fold, a coproduct, a window | an update names rows of the carrier, and none of those is a subobject of them |
+| a composition that moved the carrier, unless `confirm_carrier:` says so | the rows are the codomain's, which is almost never what was meant |
+| a **pullback** guard (`where_at` / `where_along`) | a join inside `UPDATE` is dialect-bound, so evaluating that guard means an earlier `SELECT` — the lost update this exists to remove |
+| an empty change | the identity; a statement that changes nothing is not an operation on rows |
+| the carrier's **key** | identity is not a value to reassign, so the models would no longer agree about which row they changed |
+| `:add` on a column whose type carries no addition | strings have concatenation, which is a different monoid; times have a difference and no sum |
+
+A *composition* is allowed where a pullback is not, and the difference is that it can be compiled
+without leaving the statement: the join goes in a subquery and the update names its rows by the key
+that subquery selects.
+
+```ruby
+model.update(SHOP[:orders].where(:id, 10).follow(:item),
+             { stock: Sodalite::DB.add(-1) }, confirm_carrier: :items)
+# UPDATE "items" SET "stock" = "stock" + ? WHERE "id" IN (
+#   SELECT "t1"."id" FROM "orders" "t0" JOIN "items" "t1" ON "t0"."item" = "t1"."id"
+#   WHERE "t0"."id" = ?)
+```
+
+Two semantics all three models agree on, and both come up in ordinary use:
+
+- **`:add` on a `nothing` leaves the `nothing`, and the row still counts.** A nullable column is a map
+  into `A + 1`; `+ delta` is a function on `A`; exactly one extension of it to `A + 1` leaves the
+  coproduct alone — `+ delta` on `A`, the identity on the adjoined point, which is fixed because there
+  is no element there to add to. It is also what SQL computes unaided, since `NULL + 1` is `NULL`, so
+  no model needs a special case. Reading the nothing as zero would invent an element the instance never
+  recorded.
+- **The count is rows the change was applied to**, not rows whose value came out different.
+  `DB.add(0)` counts its row. Anything else would mean reading values back to compare them, and it is
+  what a SQL `UPDATE` reports on its own.
 
 Transactions read as a combinator:
 
@@ -540,6 +848,22 @@ not migrate: N processes on M hosts means a boot-time migration has no single wr
 that runs at boot runs during a *rollback* too, at the one moment nobody wants schema changes.
 `migrate!` takes a lock, so the single writer is a mechanism rather than a wish.
 
+**One step is one transaction, so a database without transactional DDL is refused.** `DB.sql` cannot
+ask its port whether DDL survives a rollback — `execute(sql, binds) -> rows` has nowhere to put the
+question — so the caller answers once, where the connection is built:
+
+```ruby
+Sodalite::DB.sql(HISTORY, connection, transactional_ddl: false).migrate!(HISTORY)
+# => MigrationError: Sodalite::DB::Sql cannot migrate!: this database has no transactional DDL,
+#    so a step would be carried outside a transaction and an interruption could leave the schema
+#    changed with nothing in the ledger, ...
+```
+
+`true` is the default, because SQLite and Postgres both have it; a model over MySQL says `false` and
+is refused both `migrate!` and `rollback!` rather than left to half-apply a step. There is no
+override keyword, because a refusal that an argument can waive is not a refusal. `DB.sequel` answers
+the question for itself and is never asked.
+
 **Boot verifies and refuses**, in the constructor where the router's checks already are:
 
 ```ruby
@@ -556,6 +880,45 @@ Sodalite::App.build(
   and dropping the old shape.
 - A ledger holding steps this checkout does not declare → refuses, saying the database is ahead of the
   code.
+
+### `verify!` reads the ledger and nothing else
+
+That is the premise the three answers above rest on, and it should be said out loud rather than
+inferred: what a database *is* has one recorded history, and the ledger is it. Nothing reads the
+catalog, compares column types, or looks at a single row.
+
+The consequence is that **a database someone hand-altered passes**. A column added by hand, a table
+dropped by hand, a type widened by hand, a row rewritten by hand — none of it is visible to `verify!`,
+so a database can hold the right fingerprints and not have the shape the history describes.
+
+That is the right default rather than a gap left open. A boot check that re-derived the shape from the
+catalog would be a second opinion about what the database is, and it would have to be told which
+differences are allowed — because an unapplied contraction is a legal difference, and so is an index
+somebody added on a slow morning. One truth that can be wrong beats two that disagree.
+
+`create_tables_for_test!` is the same gap from the other side: it builds the whole schema in one shot
+with **no ledger entries at all**, so `verify!` refuses the result with *database is missing required
+migrations*. That is exactly why it is named that way. Anything that boots goes through `migrate!`.
+
+### Every fingerprint changed, so an older ledger is not recognised
+
+A step's identity is its content, and the ledger is keyed by the content address. That address is now
+a normalised, prefix-free serialisation under a `v1` scheme tag: a Hash's keys are sorted, an Array's
+order is kept, each atom names its kind and its byte length, and the scheme tag is inside the digest
+input rather than beside it. It replaces `args.inspect`, which rendered a Hash in insertion order and
+therefore minted a second address whenever someone permuted the fields of a `create_table` — a
+refactor that changes no meaning, turning an applied step into an unapplied one.
+
+The price of fixing that is paid once, and it is not small: **every fingerprint changed.** A database
+migrated under the old scheme presents a ledger this code does not recognise. `verify!` sees a ledger
+with no fingerprint it declares and refuses, and `migrate!` would carry every step again against a
+shape that already has it.
+
+There is no automatic conversion, because writing one would mean keeping the old normalisation around
+to recompute the addresses it produced, and a scheme tag whose predecessor is still in the code is not
+a scheme tag. The recovery is to re-seed the ledger by hand: compute `HISTORY.fingerprints` under this
+checkout and rewrite the `fingerprint` column of `sodalite_migrations` to match, step for step, before
+starting the new code against it.
 
 **Which order to deploy in follows from the kind of steps in the release**, and the two tables are not
 the same table:
@@ -587,6 +950,27 @@ HISTORY.plan.contract_steps   # => the ones that force deploy-first
 
 Renaming a column under load is therefore three releases, not one: add the new name and backfill,
 deploy code that writes both and reads the new, then drop the old.
+
+### What `add_attribute` costs, and where it stops being free
+
+The induced map on instances says the column is the constant default, while `ALTER TABLE ADD COLUMN`
+leaves existing rows `NULL`, so something has to fill them. The default is therefore declared in the
+DDL, where Postgres 11+ and SQLite give existing rows their value by reading the schema rather than by
+touching a row:
+
+```
+ALTER TABLE "users" ADD COLUMN "city" TEXT DEFAULT 'unknown'
+UPDATE "users" SET "city" = ? WHERE "city" IS NULL
+```
+
+The `UPDATE` is the fallback, narrowed to the rows still missing a value — which makes it a no-op
+wherever the declaration already worked, and safe to run again after an interrupted migration.
+
+**On a backend where the declaration does not fill, it is one full scan**, under a lock, and on a
+table large enough to be worth migrating that is the whole cost of the migration. Cutting it into key
+ranges would need the emitter to know how many rows there are, and it knows the presentation and
+nothing about the instance. So the limit is honest: `add_attribute` is an expansion and it is cheap on
+the two backends named above; anywhere else, measure before you apply it to a large table.
 
 Rolling back walks the inverses and refuses **before the first statement runs** if anything in the
 range forgets information:
@@ -656,7 +1040,20 @@ status, _headers, chunks = app.call('REQUEST_METHOD' => 'GET', 'PATH_INFO' => '/
 
 No mocks, because the in-memory database is a *model of the same theory* the SQL one is a model of, not
 a stand-in for it. This is also where `functor?` earns its keep: assert it after a workflow and a
-dangling foreign key fails the test, since production will not tell you.
+dangling foreign key fails the test. It exists on all three models, so the same assertion is
+available against a real database — but nothing calls it for you, in a test or in production, which
+is what makes writing it down worth the line.
+
+A suite that wants a real database and has no history to build one from asks for the shape directly:
+
+```ruby
+Sodalite::DB.sql(SCHEMA, connection).create_tables_for_test!
+Sodalite::DB.sequel(SCHEMA, database).create_tables_for_test!
+```
+
+Tables, primary keys, and the indexes the morphisms asked for, in one shot — and **no ledger entries**,
+which is why it says `for_test`. A database built this way is refused by `verify!`, so it cannot become
+the way something boots by accident.
 
 Under `world: :fixed` the clock is frozen and a contract breach **raises**, so a response drifting from
 its declared schema fails the suite rather than reaching a client.
@@ -699,12 +1096,42 @@ the reason in hand.
 | `MigrationError`: *database is missing required migrations* | boot verification found an unapplied expansion — apply, then start |
 | `MigrationError`: *this checkout is older than the migration ledger* | an old release is starting against a newer database |
 | `MigrationError`: *cannot rollback irreversible migrations* | the range contains a drop; nothing ran |
-| `MigrationError`: *another migration is running* | the lock is held. If a runner crashed, clear it: `DELETE FROM sodalite_migration_lock` |
+| `MigrationError`: *another migration is running* | the lock is held, and the message names the holder and how long it has held it |
+| `MigrationError`: *has no transactional DDL* | `transactional_ddl: false`; a step could be half-applied with nothing in the ledger, so nothing ran |
+| `MigrationError`: *requirements … are not provided* | a history with no `create_table` for an object it operates on; there is no way to adopt an existing database |
+| `KeyError`: *key not found* from `DB.history` | a `rename_table` or `split_table` declared before the step that creates its object; presentations bootstrap in declaration order |
+| `SchemaError`: *arrives at* / *has no morphism* | a path equation whose sides land on different objects, or that names a morphism the schema does not have |
+| `QueryError`: *has no morphism … to pull back along* | a `where_at` / `where_along` path that is not a path in the schema |
+| `QueryError`: *needs a subobject of …* | `delete` or `update` through a projection, a fold, a coproduct, or a window |
+| `QueryError`: *would change rows of …* | a composition moved the carrier; pass `confirm_carrier:` to mean it |
+| `QueryError`: *cannot be guarded by a pullback* | an update guarded by `where_at` / `where_along`; the guard has to be evaluated inside the statement, and a join there is not portable |
+| `QueryError`: *needs a change* | an empty changes Hash, which is the identity |
+| `QueryError`: *is the identity of a row, not a value to reassign* | a change of the carrier's key |
+| `QueryError`: *carries no addition* | `DB.add` on a column whose type has no sum |
 | 500 with `contract` in the log | the response did not fit its declared schema under `Effects.real` |
 | 400 on `?page=` | an empty query value is present-and-empty, not absent |
 
-**Not implemented, on purpose or not yet:** database-level foreign key constraints, indexes, unique and
-check constraints, composite keys, declared headers, wildcard route segments, `functor?` on the SQL
-models, `Π_F` (folding two tables into one by a product over a shared key), an `empty_as_absent` decode
-option, RBS for a whole route, and durability — work that must survive a restart belongs in a durable
-engine, not here.
+Clearing a stale lock is explicit and never automatic — a lock that lets go of itself after a timeout
+is not a lock:
+
+```ruby
+# a lock old enough to be stale — it goes, and the receipt says whose it was
+model.steal_lock!(older_than: 900)
+# => "cleared the migration lock held by <host>:<pid> since 2026-08-05T05:19:45Z (1204s)"
+
+# a lock younger than that — it stays, and the refusal says by how much
+model.steal_lock!(older_than: 900)
+# => MigrationError: the migration lock is 12s old, which is younger than the 900s asked for,
+#    so it was left alone; <host>:<pid> may still be working
+```
+
+`older_than` is in seconds and has no default, because only the caller knows how long the migration it
+is about to displace normally takes. The lock row carries the holder and the acquisition time, so both
+the refusal and the receipt name a runner instead of speculating that one crashed. (`<host>:<pid>` and
+the timestamp are what the running process wrote; the wording around them is verbatim.)
+
+**Not implemented, on purpose or not yet:** database-level foreign key constraints, unique and check
+constraints, indexes beyond the one each foreign key column gets, composite keys, declared headers,
+wildcard route segments, `Π_F` (folding two tables into one by a product over a shared key), an
+`empty_as_absent` decode option, RBS for a whole route, and durability — work that must survive a
+restart belongs in a durable engine, not here.

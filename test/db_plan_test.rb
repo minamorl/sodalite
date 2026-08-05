@@ -18,6 +18,8 @@ class DBPlanTest < Minitest::Test
        [:users], %i[posts posts.id posts.author], []],
       [step(:add_attribute, :users, :city, :string, ''), { users: { id: :integer } },
        [:users], [:'users.city'], []],
+      [step(:add_attribute, :posts, :author, Sodalite::DB.fk(:users), 1), { posts: { id: :integer } },
+       %i[posts users], [:'posts.author'], []],
       [step(:drop_attribute, :users, :city), { users: users },
        [:'users.city'], [], [:'users.city']],
       [step(:rename_attribute, :users, :city, :town), { users: users },
@@ -29,8 +31,11 @@ class DBPlanTest < Minitest::Test
       [step(:merge_tables, %i[cats dogs], :animals, :species),
        { cats: { id: :integer, name: :string }, dogs: { id: :integer, name: :string } },
        %i[cats dogs], %i[animals animals.*], %i[cats cats.* dogs dogs.*]],
+      # The presentation holds an object the step does not name, which is what
+      # makes this row say anything: a decomposition claims the fibres it makes
+      # and not `users`, which some other step made and still supplies.
       [step(:split_table, :animals, :species, { 'cats' => :cats, 'dogs' => :dogs }),
-       { animals: animals }, [:'animals.species'],
+       { users: users, animals: animals }, [:'animals.species'],
        %i[cats cats.id cats.name dogs dogs.id dogs.name], %i[animals animals.*]]
     ]
 
@@ -105,6 +110,26 @@ class DBPlanTest < Minitest::Test
 
     assert_match(/create_table\(:cats/, error.message)
     assert_match(/create_table\(:dogs/, error.message)
+  end
+
+  # A foreign key is a morphism, so the column that carries it needs its codomain
+  # to be an object already. The solver reads that off `requires`: `users` only
+  # comes into existence in the second layer, so the column pointing at it waits
+  # for the third however the four were declared.
+  def test_an_added_foreign_key_waits_for_the_table_it_points_at
+    accounts = [:create_table, :accounts, { id: :integer }]
+    rename = %i[rename_table accounts users]
+    posts = [:create_table, :posts, { id: :integer }]
+    author = [:add_attribute, :posts, :author, Sodalite::DB.fk(:users), 1]
+
+    [[accounts, rename, posts, author], [posts, author, accounts, rename]].each do |declared|
+      plan = Sodalite::DB.history(*declared).plan
+
+      assert_equal %i[posts users], plan.order.last.requires({})
+      assert_equal 3, plan.layers.size
+      assert_equal [:rename_table], plan.layers[1].map(&:kind)
+      assert_equal [:add_attribute], plan.layers[2].map(&:kind)
+    end
   end
 
   # A removal separates two supplies of one name, so this is replacement rather

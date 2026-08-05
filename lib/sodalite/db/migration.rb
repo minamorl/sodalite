@@ -49,6 +49,12 @@ module Sodalite
     # Injectivity asks whether information survives; expansion asks whether the old presentation embeds.
     EXPAND_STEPS = %i[create_table add_attribute].freeze
 
+    # The normalisation a fingerprint is taken under, carried inside the digest
+    # input rather than beside it. A later change to the rules then produces a
+    # visibly different address for every step instead of silently colliding
+    # with addresses computed under the old ones.
+    FINGERPRINT_SCHEME = 'v1'
+
     Step = Data.define(:kind, :args) do
       def self.[](kind, *args)
         raise MigrationError, "unknown migration step #{kind.inspect}" unless STEP_KINDS.include?(kind)
@@ -66,11 +72,16 @@ module Sodalite
         EXPAND_STEPS.include?(kind)
       end
 
+      # A foreign key is a morphism, so declaring one requires its codomain to
+      # already be an object. That holds wherever the declaration appears:
+      # without it here, a history could be solved so the arrow is added before
+      # the table it points at exists.
       def requires(_spec)
         table, *rest = args
         return rest[0].values.grep(FK).map(&:target).uniq if kind == :create_table
         return table if kind == :merge_tables
         return [attribute(table, rest[0])] if %i[split_table drop_attribute rename_attribute].include?(kind)
+        return [table, *fk_target(rest[1])] if kind == :add_attribute
 
         [table]
       end
@@ -96,8 +107,14 @@ module Sodalite
         end
       end
 
+      # The content address. `inspect` cannot be the input: it renders a Hash in
+      # the order its keys were inserted, so permuting the fields of a
+      # `create_table` — a refactor that changes no meaning — would mint a second
+      # address for the same step, and a ledger keyed by address would then call
+      # an applied step unapplied. `normalise` is the only input, so the address
+      # is a function of content and of nothing else.
       def fingerprint
-        Digest::SHA256.hexdigest("#{kind}\x1f#{args.inspect}")[0, 16]
+        Digest::SHA256.hexdigest("#{FINGERPRINT_SCHEME}\x1f#{kind}\x1f#{normalise(args)}")[0, 16]
       end
 
       def to_s
@@ -172,6 +189,54 @@ module Sodalite
 
       private
 
+      def fk_target(type)
+        type.is_a?(FK) ? [type.target] : []
+      end
+
+      # Recursive and total. A Hash is an unordered map, so its keys are sorted;
+      # an Array is ordered data — `merge_tables` takes a *sequence* of sources,
+      # and which one is the first injection is part of what the step says — so
+      # its order is kept. A kind nobody anticipated raises rather than falling
+      # back to `inspect`, which would put insertion order back into the address
+      # somewhere no one is looking.
+      def normalise(value)
+        case value
+        when Hash then normalise_hash(value)
+        when Array then "[#{value.map { |element| normalise(element) }.join(',')}]"
+        when FK then "fk(#{normalise(value.target)})"
+        else normalise_atom(value)
+        end
+      end
+
+      # Each atom names its kind and its byte length, so `:1`, `'1'` and `1` are
+      # three renderings and no separator can be forged from inside a string.
+      def normalise_atom(value)
+        case value
+        when Symbol then tagged('sym', value.to_s)
+        when String then tagged('str', value)
+        when Integer then tagged('int', value.to_s)
+        when Float then tagged('flt', value.to_s)
+        # These three carry no payload, so the class name is the whole content.
+        when nil, true, false then "lit:#{value.class}"
+        else
+          raise MigrationError,
+                "#{value.class} in #{self} has no fingerprint rendering, so the step has no content " \
+                'address; give the normaliser one rather than hashing an inspect string'
+        end
+      end
+
+      def tagged(tag, text)
+        "#{tag}:#{text.bytesize}:#{text}"
+      end
+
+      # Keys compare by `to_s` so a Symbol key and a String key sort against each
+      # other; their renderings break the tie when they spell the same text,
+      # which keeps the order total instead of leaving it to insertion order.
+      def normalise_hash(hash)
+        pairs = hash.map { |key, value| [key.to_s, normalise(key), normalise(value)] }.sort
+        "{#{pairs.map { |_text, key, value| "#{key}=>#{value}" }.join(',')}}"
+      end
+
       def attribute(table, field)
         :"#{table}.#{field}"
       end
@@ -180,8 +245,18 @@ module Sodalite
         [table, *fields.keys.map { |field| attribute(table, field) }]
       end
 
+      # What a decomposition brings into being: the fibres `into` names, and
+      # their attributes. Nothing else — the whole resulting presentation had the
+      # step claim every object in the database, the ones other steps make
+      # included, so `Plan` read one name as supplied twice and refused to
+      # schedule any history holding a split beside another table. The fields
+      # come back out of `split`, because "the source's fields minus the tag" is
+      # what a fibre *is*, and a second spelling of it here is a second sentence
+      # that can drift from the first.
       def split_names(spec)
-        apply(spec).flat_map { |name, fields| names_for(name, fields) }
+        table, tag, into = args
+        decomposed = split(spec, table, tag, into)
+        into.values.map(&:to_sym).uniq.flat_map { |name| names_for(name, decomposed.fetch(name)) }
       end
 
       def provided_attribute(table, rest)
@@ -195,23 +270,19 @@ module Sodalite
       end
     end
 
-    # The ordered composite. A version is how far along it a database has got.
+    # The ordered composite. Every fold below walks `plan.order`, the solved
+    # order, because that is the only order a migration means: `Plan` exists
+    # precisely because the sequence someone typed carries none. `after` in the
+    # method names is the unit — a count of steps along that order, the same
+    # number line `Ledger#rollback!(to:)` indexes.
     class History
       attr_reader :steps, :plan
 
       def initialize(steps)
         @steps = steps.map { |step| step.is_a?(Step) ? step : Step[*step] }.freeze
-        before = {}
-        presentations = @steps.to_h do |step|
-          presentation = before
-          before = step.apply(before)
-          [step, presentation]
-        rescue KeyError
-          [step, presentation]
-        end
-        @plan = Plan.new(@steps, presentations)
+        @plan = Plan.new(@steps, bootstrap_presentations)
         # The composite and the solved order both fail at declaration, never on a request path.
-        spec_at(@steps.size)
+        spec_after(@steps.size)
         freeze
       end
 
@@ -219,30 +290,47 @@ module Sodalite
         @steps.size
       end
 
-      def spec_at(version)
-        @steps.first(version).reduce({}) { |spec, step| step.apply(spec) }
+      def spec_after(count)
+        @plan.order.first(count).reduce({}) { |spec, step| step.apply(spec) }
       end
 
-      def schema_at(version)
-        Schema.new(spec_at(version))
+      def schema_after(count)
+        Schema.new(spec_after(count))
       end
 
       def schema
-        schema_at(size)
+        schema_after(size)
       end
 
-      # Whether rolling back to `version` would forget anything. Answerable
-      # before a single statement runs, because it is a property of the maps.
-      def reversible_to?(version)
-        @steps.drop(version).all?(&:reversible?)
+      # Whether rolling back to `count` would forget anything. Answerable before
+      # a single statement runs, because it is a property of the maps.
+      def reversible_after?(count)
+        @plan.order.drop(count).all?(&:reversible?)
       end
 
       def irreversible_steps
-        @steps.reject(&:reversible?)
+        @plan.order.reject(&:reversible?)
       end
 
       def fingerprints
-        @steps.map(&:fingerprint)
+        @plan.order.map(&:fingerprint)
+      end
+
+      private
+
+      # `Plan` needs a presentation per step before any order exists, so this one
+      # fold has to run in declaration order — it is the bootstrap the solver is
+      # computed from, not the public fold, and a step whose declared position
+      # has no presentation yet keeps the last one that typechecked.
+      def bootstrap_presentations
+        before = {}
+        @steps.to_h do |step|
+          presentation = before
+          before = step.apply(before)
+          [step, presentation]
+        rescue KeyError
+          [step, presentation]
+        end
       end
     end
   end

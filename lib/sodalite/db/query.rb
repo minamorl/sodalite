@@ -70,7 +70,7 @@ module Sodalite
         check_fragment_open!(:follow)
         check_not_united!(:follow)
         target = schema.target_of(carrier, fk)
-        with(carrier: target, steps: (steps + [[:follow, fk.to_sym, target]]).freeze)
+        with(carrier: target, steps: normalised(steps + [[:follow, fk.to_sym, target]]))
       end
 
       # A subobject of the current carrier.
@@ -85,10 +85,42 @@ module Sodalite
       def where(field, operator_or_value, value = NO_OPERAND)
         check_fragment_open!(:where)
         check_not_united!(:where)
-        operator, operand = value.equal?(NO_OPERAND) ? [:eq, operator_or_value] : [operator_or_value, value]
+        operator, operand = comparison(operator_or_value, value)
         check_field!(field)
         check_comparison!(field, operator, operand)
         with(steps: (steps + [[:where, field.to_sym, operand, operator]]).freeze)
+      end
+
+      # The pullback. For a morphism `f : posts -> users` and a subobject `S` of
+      # users, `f*(S)` is a subobject of *posts* — the elements whose image under
+      # f lands in S. `follow` hands you S instead, which is why "posts whose
+      # author lives in tokyo" cannot be written with it: the composite yields
+      # users, and the posts were the thing being asked about.
+      #
+      #   posts.where_at(:author, :city, 'tokyo')
+      #   comments.where_along(%i[post author], :city, 'tokyo')
+      #
+      # So the carrier does not move. The field and the comparison are checked
+      # against the object at the end of the path rather than against the carrier,
+      # and SQL emits the same JOIN it emits for a composition — it just leaves
+      # the carrier's alias as the one later steps qualify against. Which side of
+      # the span the result is read from is the whole difference.
+      #
+      # This is not a fourth primitive: it is `where`, formed along a path, and
+      # phase one is still composition, subobject, image.
+      def where_at(path, field, operator_or_value, value = NO_OPERAND)
+        where_along([path], field, operator_or_value, value)
+      end
+
+      def where_along(paths, field, operator_or_value, value = NO_OPERAND)
+        check_fragment_open!(:where_along)
+        check_not_united!(:where_along)
+        paths = Array(paths).map(&:to_sym)
+        target = path_target(paths)
+        operator, operand = comparison(operator_or_value, value)
+        check_field!(field, target)
+        check_comparison!(field, operator, operand, target)
+        with(steps: (steps + [[:pullback, paths.freeze, field.to_sym, operand, operator]]).freeze)
       end
 
       # The explicit elimination of `A + 1`: the fibre over `nothing`, and its
@@ -138,6 +170,26 @@ module Sodalite
         step && step[1]
       end
 
+      # Whether the image still has to be taken. `SELECT DISTINCT` is how SQL
+      # spells image factorization, and there is exactly one thing in phase one
+      # that gives it work to do.
+      #
+      # `follow` moves the carrier to the codomain, whose fibres can hold more
+      # than one element, so the join repeats a target row once per element over
+      # it and the duplicates are real. A pullback join cannot do that: it is
+      # taken along a function, every element has exactly one image, and the row
+      # source keeps one row per element of the carrier. With no `follow` at all,
+      # keeping the carrier's key in the output makes the tuples distinct by that
+      # key's own uniqueness, and the dedupe is sorting for nothing.
+      #
+      # One answer, on the query, because three models each deciding this for
+      # themselves is three chances to decide it differently.
+      def distinct?
+        return true if steps.any? { |kind, _| kind == :follow }
+
+        !output_fields.include?(schema.table(carrier).key)
+      end
+
       # A query with no projection yields whole rows of its carrier, so its
       # result can be typed by the same zeolite schema that types a row.
       def row_schema
@@ -148,6 +200,50 @@ module Sodalite
 
       def to_s
         "#{root}#{steps.map { |kind, *rest| ".#{kind}(#{rest.first})" }.join}"
+      end
+
+      private
+
+      # The trailing run of compositions, rewritten to the shortest path the
+      # schema's equations prove equal to it.
+      #
+      # This is an optimisation **derived from the schema rather than guessed
+      # at**: nothing here reads data, statistics, or a hint. It reads a
+      # declared equality between two composites and takes the shorter one.
+      #
+      # And it is sound relative to the *declared theory*, which is weaker than
+      # sound. An instance that violates the equation answers differently after
+      # the rewrite; so does one where a morphism on the longer path has no
+      # value at some element, because the longer path drops that element and
+      # the shorter one keeps it. That is the exact standing of a dangling
+      # foreign key — a failure to be a functor into the presented category —
+      # and it is reported the same way, by `equation_violations` on every
+      # model, and enforced by nothing.
+      #
+      # Only the trailing run is looked at, and only a suffix of it. A `where`
+      # between two compositions was taken on the object the run had reached, so
+      # rewriting across it would move that subobject to a different object.
+      #
+      # The carrier cannot move: construction refused any equation whose sides
+      # arrive at different objects, so a rewritten path ends where the original
+      # did. And only a composition moves the carrier at all, which is why the
+      # run starts at the codomain of the last one before it, or at the root.
+      def normalised(walk)
+        return walk.freeze if schema.equations.empty?
+
+        run = walk.reverse.take_while { |kind, _| kind == :follow }.reverse
+        head = walk.first(walk.size - run.size)
+        (head + hops(head.reverse.find { |kind, _| kind == :follow }&.last || root, run)).freeze
+      end
+
+      # The run, rewritten to the shortest path the equations prove equal to it,
+      # as the steps that walk it. Each rebuilt step records its own codomain,
+      # which is what lets an evaluator read the carrier off the steps instead
+      # of deriving it again.
+      def hops(from, run)
+        path = schema.normalise_path(from, run.map { |_, fk| fk })
+        objects = schema.path_objects(from, path)
+        path.each_with_index.map { |fk, hop| [:follow, fk, objects[hop + 1]] }
       end
     end
   end

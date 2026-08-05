@@ -20,7 +20,9 @@ module Sodalite
       end
 
       # The coproduct on instances: the disjoint union, with each element
-      # carrying the injection it came through.
+      # carrying the injection it came through. Disjointness is not established
+      # here — `preflight_violations` has already established it, which is what
+      # lets a concatenation be the sum.
       def merge_rows(sources, into, tag)
         @store[into] = sources.flat_map do |source|
           @store.fetch(source).map { |row| row.merge(tag => source.to_s) }
@@ -28,6 +30,11 @@ module Sodalite
         sources.each { |source| @store.delete(source) }
       end
 
+      # `into.fetch` cannot raise: `preflight_violations` has already put the
+      # image of the tag inside `into`, so every row has a fibre to land in. The
+      # guarantee is worth naming here rather than rescuing, because a rescue
+      # would hide the one case in which it stopped holding — and it would hide
+      # it after the targets above had already been emptied.
       def split_rows(table, tag, into)
         rows = @store.fetch(table)
         into.each_value { |name| @store[name.to_sym] = [] }
