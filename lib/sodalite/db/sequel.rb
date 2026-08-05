@@ -44,6 +44,37 @@ module Sodalite
         self
       end
 
+      # --- the functor laws, checkable ---------------------------------------
+      # A dangling foreign key is not a bad row. It is a failure to be a functor:
+      # the morphism `posts -> users` has no value at that element. The in-memory
+      # model answers this by intersecting sets; here it is two datasets, and the
+      # sentence is the schema's either way so the three models cannot report the
+      # same failure in three wordings.
+      #
+      # It stays a diagnostic. Nothing calls it on `insert` or `delete` and the DDL
+      # emits no `REFERENCES`, because integrity here is a property of the instance
+      # that can be asked about, not a constraint the backend is told to hold.
+      def functor?
+        violations.empty?
+      end
+
+      def violations
+        @schema.tables.each_value.flat_map do |table|
+          table.foreign_keys.flat_map { |field, target| dangling(table, field, target) }
+        end
+      end
+
+      # `NOT IN` over a null is `UNKNOWN`, so a row where the morphism has no value
+      # at all would fall out of both sides of it and be reported by neither. That
+      # row is exactly the one being looked for, so it is asked for explicitly
+      # rather than left to three-valued logic — which is also what makes this
+      # agree with the model that computes it in Set.
+      def dangling(table, field, target)
+        keys = @db[target].select(@schema.table(target).key)
+        @db[table.name].exclude(field => keys).or(field => nil).select_map(field)
+                       .map { |value| @schema.dangling_message(table.name, field, value, target) }
+      end
+
       # --- reading ------------------------------------------------------------
 
       def select(query)
@@ -62,11 +93,28 @@ module Sodalite
         row[table.key]
       end
 
-      def delete(query)
-        doomed = select(query)
+      # Naming the doomed rows by their keys needs the keys to be there, which is
+      # `deletable!`'s job: a projection has dropped them, and `where(key => [nil,
+      # nil])` then deletes nothing while the count says otherwise. So the arrow is
+      # checked before anything runs, and the count is the one the backend reports
+      # rather than the size of a set measured a statement earlier — between the
+      # two, another writer is a possibility, and the honest number is the one the
+      # `DELETE` actually did.
+      #
+      # Reading the keys and deleting by them are two statements, so they are one
+      # scope. `atomically` joins an outer transaction rather than opening a
+      # second, which is what makes that safe to say here.
+      def delete(query, confirm_carrier: nil)
+        query.deletable!(confirm_carrier: confirm_carrier)
         table = @schema.table(query.carrier)
-        @db[table.name].where(table.key => doomed.rows.map { |row| row[table.key] }).delete
-        doomed.size
+        atomically do
+          keys = select(query).rows.map { |row| row[table.key] }
+          # An empty subobject is not a `DELETE` with an empty list; it is nothing
+          # to do.
+          next 0 if keys.empty?
+
+          @db[table.name].where(table.key => keys).delete
+        end
       end
 
       # Same contract as the other two: the caller never asks for a rollback, it

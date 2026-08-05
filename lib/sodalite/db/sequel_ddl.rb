@@ -62,15 +62,32 @@ module Sodalite
       def create_table(table)
         key = table.key
         columns = table.fields.map { |field| [field, type_of(table, field)] }
+        indexes = table.foreign_keys.keys.map { |field| [field, index_name(table.name, field)] }
         @db.create_table(table.name) do
           columns.each { |field, type| column(field, type, primary_key: field == key) }
+          indexes.each { |field, name| index(field, name: name) }
         end
       end
 
-      def type_of(table, field)
-        return Integer if table.foreign_keys.key?(field)
+      # Every morphism out of this object compiles to a join on its column —
+      # `follow` and a pullback emit the same one — so an index on it follows from
+      # the presentation rather than from tuning applied to it afterwards. Sequel
+      # spells it inside `create_table` and emits its own `CREATE INDEX` after the
+      # table, which is what a backend that cannot put one inline needs.
+      #
+      # The name is spelled rather than left to the adapter, because a name the
+      # backend invents is a name the other models cannot agree with.
+      def index_name(table, field)
+        :"index_#{table}_on_#{field}"
+      end
 
-        SQL_TYPES.fetch(table.attributes[field].to_s.delete_suffix('?').to_sym, String)
+      # A foreign key column holds the target's key, so its type is the target's
+      # key type — `Integer` only when the target's key is one. Reading
+      # `attributes` here would find nothing for a morphism and reading the FK as
+      # an integer would be a lie the row schema does not tell, so both go through
+      # the one accessor that resolves it.
+      def type_of(table, field)
+        SQL_TYPES.fetch(table.column_type(field).to_s.delete_suffix('?').to_sym, String)
       end
     end
   end
