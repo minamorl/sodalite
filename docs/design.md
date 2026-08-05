@@ -1,4 +1,4 @@
-# Zeolite Web — the design
+# Sodalite — the design
 
 **A web framework where the request is a value, the world is a parameter, and nothing untyped gets
 in or out.**
@@ -49,8 +49,8 @@ Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.fixed(find_user: -
 ```
 
 This is not a testing convenience bolted on afterwards; it is what darkcore already is. The
-framework's own IO goes through the same door — `:zeolite_clock`, `:zeolite_id`, `:zeolite_log`,
-`:zeolite_contract` — so there is no `Time.now` and no `SecureRandom` reachable from a request path
+framework's own IO goes through the same door — `:sodalite_clock`, `:sodalite_id`, `:sodalite_log`,
+`:sodalite_contract` — so there is no `Time.now` and no `SecureRandom` reachable from a request path
 except through a handler you supplied. A whole request is reproducible byte for byte.
 
 **3. Failure keeps its state.** A route is a berylx workflow, so a failure is
@@ -137,12 +137,35 @@ resembles it — against the declared schema. What gets checked is what the clie
 "typed on the way out" is literally true rather than aspirational.
 
 A response that does not fit is the service breaking its own published contract. That is not an
-ordinary error, so it does not take an ordinary path: it performs `:zeolite_contract`, and the
+ordinary error, so it does not take an ordinary path: it performs `:sodalite_contract`, and the
 handler decides the cost. `Effects.fixed` raises, so drift fails the suite. `Effects.real` logs and
 returns a 500, so drift does not ship a wrong shape to a client that trusted the contract.
 
 Error responses are typed too, by the same schema (`Errors::SCHEMA`), so "what does a 400 look like"
 has an answer you can read instead of infer.
+
+## The database is a theory, not more verbs
+
+"The world is a parameter" is weakest where the world is a database, because a handler map for
+`:find_user` and `:insert_user` is a model of nothing in particular — the verbs are whatever the
+application invented, and no equation relates them. `Sodalite::DB` replaces that part of the
+signature with a fixed one (`SELECT`, `INSERT`, `DELETE`, `ATOMICALLY`) over a schema that is a
+finitely presented category, so a handler map for those four is a *model of the relational theory*
+and the in-memory one is a model rather than a stub. [The RDBMS note](rdbms.md) works it out;
+[the migration note](migrations.md) does the same for schema change.
+
+Two decisions there are design-level rather than API-level, and both belong in this document because
+both are choices about what the framework will and will not hold for you:
+
+- **Integrity is reported, not enforced.** An instance is a functor into `Set`, so a dangling foreign
+  key is a failure to be a functor rather than a bad row — but `insert` does not check it, `delete`
+  does not check for referrers, and the DDL emits no `REFERENCES`. `functor?` and `violations` answer
+  when asked. Enforcing it in the writes would turn something an instance *is* into something a model
+  holds on its behalf, which is a different object. The same goes one layer up for path equations and
+  `equation_violations`.
+- **The ledger is the truth about what a database is.** `verify!` reads it and nothing else, so a
+  database someone hand-altered passes, and a history cannot adopt a database it did not create. That
+  is one truth that can be wrong rather than two that disagree about which of them is.
 
 ## Streaming, because the sieve already reads streams
 
@@ -205,6 +228,6 @@ never learn about `sodalite`.
 - **RBS for a whole route.** `schema.to_rbs` already emits signatures for the generated classes. A
   route could emit the signature of its own handler — request type in, response type out — so
   `steep` checks the tasks against the contract, not just the values.
-- **OpenAPI.** Every route already carries its full declared shape, in and out, as data. An OpenAPI
-  document is a fold over `app.routes`, not a second set of annotations to keep in sync. Whether the
-  framework should ship that fold is a scope question, not a technical one.
+- **~~OpenAPI.~~** Answered: the framework ships the fold. `Sodalite::OpenAPI.document(app, …)` is
+  derived from `app.routes` rather than maintained beside them, so there is no second set of
+  annotations to keep in sync and nothing to drift.

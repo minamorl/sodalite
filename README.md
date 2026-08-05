@@ -197,11 +197,12 @@ handler map becomes a *model* of a theory rather than a model of nothing.
 
 ```ruby
 SCHEMA = Sodalite::DB.schema(
-  users: { id: :integer, name: :string, city: :string },
+  users: { id: :integer, name: :string, city: :string, age: :integer? },
   posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
 )
 
 in_tokyo = SCHEMA[:posts].where(:title, 'hello').follow(:author).where(:city, 'tokyo').select(:name)
+posted_from_tokyo = SCHEMA[:posts].where_at(:author, :city, 'tokyo')
 
 busy = SCHEMA[:users].group(:city).count(:people).having(:people, :gt, 1).order(:people, :desc)
 adults = SCHEMA[:users].where(:age, :gte, 18).union(SCHEMA[:users].where_null(:age))
@@ -211,15 +212,50 @@ adults = SCHEMA[:users].where(:age, :gte, 18).union(SCHEMA[:users].where_null(:a
 wherever the type is a plain set — over a nullable column `NOT (x = 3)` is three-valued, so the
 complement is refused there and `where_null` / `where_present` eliminate the `A + 1` explicitly.
 
-A schema is a finitely presented category: tables are objects, foreign keys are morphisms, and an
-instance is a functor into `Set` — so a dangling foreign key is not a bad row, it is a failure to be a
-functor, and `model.functor?` says so. There is no `join` in the query language: `follow` is
-composition, and the join is what the compiler emits.
+`in_tokyo` and `posted_from_tokyo` answer with different objects, and that is the whole of what
+`where_at` is for. `follow` is composition, so it yields *users* — which makes "posts whose author
+lives in tokyo" unsayable with it, because the posts were the thing being asked about.
+`where_at(path, field, …)` is the pullback `f*(S)`: the subobject of the **carrier** whose image
+under the path satisfies the predicate. It emits the same join and reads the other side of the span.
+`where_along` takes a path of more than one hop. Neither is a fourth primitive — it is `where`,
+formed along a path, and phase one is still composition, subobject, image.
+
+A schema is a **finitely presented** category: tables are objects, foreign keys are morphisms, and
+`equations:` are path equations — pairs of composites declared equal.
+
+```ruby
+Sodalite::DB.schema(
+  employees:   { id: :integer, name: :string, manager: Sodalite::DB.fk(:employees),
+                 department: Sodalite::DB.fk(:departments) },
+  departments: { id: :integer, title: :string },
+  equations:   [[:employees, %i[manager department], %i[department]]]
+)
+```
+
+Declaring none leaves the *free* category on the graph of foreign keys, where no two distinct paths
+are ever equal — so "an employee's manager is in their department" cannot be said at all. It is not
+sayable to SQL either: a foreign key relates one column to one key, never one path to another, which
+is why it belongs to the presentation rather than to the DDL.
+
+An instance is a functor into `Set`, so a dangling foreign key is not a bad row — it is a failure to
+be a functor. **Reported, not enforced**, and that is a decision rather than an omission: `insert`
+does not check that a foreign key's target exists, `delete` does not check for referrers, and the
+DDL emits no `REFERENCES`. An instance can therefore stop being a functor between two writes, and
+`functor?` / `violations` are how you ask — on all three models, not the in-memory one alone. A path
+equation has the same standing one layer up, as a condition on the functor once it is one, and
+`equation_violations` reports it the same way.
+
+There is no `join` in the query language: `follow` is composition, and the join is what the compiler
+emits.
 
 ```
-SELECT DISTINCT t1.name FROM posts t0 JOIN users t1 ON t0.author = t1.id
-WHERE t0.title = ? AND t1.city = ?
+SELECT DISTINCT "t1"."name" FROM "posts" "t0" JOIN "users" "t1" ON "t0"."author" = "t1"."id"
+WHERE "t0"."title" = ? AND "t1"."city" = ?
 ```
+
+Every identifier is quoted, so a table called `order` works, and `SELECT DISTINCT` is dropped where
+the dedupe is provably redundant — `posted_from_tokyo` above compiles without it, because a pullback
+joins along a function and cannot repeat a row of the carrier.
 
 Three models, not a stub and the real thing: `DB.memory` (an instance functor into Set), `DB.sql`
 (arrows compiled to SQL text, no driver anywhere near it), and `DB.sequel` (the same arrows lowered
@@ -254,20 +290,32 @@ HISTORY = Sodalite::DB.history(
   [:rename_attribute, :users, :city, :town]
 )
 
-HISTORY.schema              # the composite — nothing is declared twice
-HISTORY.reversible_to?(0)   # => true; a drop_attribute would make it false
+HISTORY.schema                 # the composite — nothing is declared twice
+HISTORY.reversible_after?(0)   # => true; a drop_attribute would make it false
 ```
 
 `rename` is an isomorphism, `add_attribute` is injective (the column is the constant default, so the
 original projects back out), `drop_attribute` is a projection and forgets. That answer arrives before
-a statement runs. Both models carry the history and the conformance suite covers "migrate, then
+a statement runs. All three models carry the history and the conformance suite covers "migrate, then
 query".
+
+`after` is the unit, and it is a count of steps along `plan.order` — the *solved* order, the same
+number line `rollback!(to:)` indexes. `schema_after`, `spec_after`, and `reversible_after?` all read
+it. Counting along the order someone typed would be counting along the one thing here that carries no
+meaning.
 
 **The order is solved, not declared.** Each step says what names it requires, provides, and removes,
 and those solve into layers — so two branches that each appended a step merge without the index drift
 that an ordered ledger turns into a false fingerprint mismatch. The ledger is keyed by the step's
 content, and a contradiction (two steps supplying one name, a requirement nobody supplies, a cycle) is
 refused at declaration rather than at 3am.
+
+That content address is a normalised, prefix-free serialisation under a `v1` scheme tag, so
+permuting the fields of a `create_table` no longer mints a second address for the same step. It also
+means **every fingerprint changed**: a database migrated under the older scheme presents a ledger
+this code does not recognise, and its rows have to be re-seeded by hand. A history also cannot
+*adopt* a database it did not create — the first steps are always the `create_table`s. Both are
+[in the migration note](docs/migrations.md#what-this-does-not-decide), with what to do about them.
 
 **Expansion is not reversibility.** `rename_attribute` is an isomorphism, so it rolls back perfectly,
 and it still breaks every process running the old code — the old presentation is not *included* in the

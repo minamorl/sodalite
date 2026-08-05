@@ -9,7 +9,7 @@ handlers and the real handlers are two versions of the same thing. A test passes
 a stub that happened to return the right shape.
 
 This note works out what the database boundary looks like once that gap is closed, and what the
-existing pieces already force. The two-model conformance suite in section 5 is the part that turns the
+existing pieces already force. The three-model conformance suite in section 5 is the part that turns the
 argument into something a test runner can settle.
 
 ## What is already categorical here
@@ -62,6 +62,41 @@ DB = Sodalite::DB.schema(
 )
 ```
 
+**The path equations are real now, and they are what "presented" buys.** Declaring none leaves the
+*free* category on the graph of foreign keys, and in a free category no two distinct paths are ever
+equal — so the fourth bullet above could be written in the note and not in the schema:
+
+```ruby
+PRESENTED = Sodalite::DB.schema(
+  employees:   { id: :integer, name: :string, manager: Sodalite::DB.fk(:employees),
+                 department: Sodalite::DB.fk(:departments) },
+  departments: { id: :integer, title: :string },
+  equations:   [[:employees, %i[manager department], %i[department]]]
+)
+```
+
+Two things follow, and they are different in kind. The first is a constraint SQL's foreign keys
+cannot express at all: a foreign key relates one column to one key, never one path to another, so
+this has nowhere to live except the presentation. It is **reported, not enforced** — the same
+standing as referential integrity, one layer up — and `equation_violations` is how it is asked:
+
+```ruby
+model.equation_violations
+# => ["employees.id=3: manager.department = 1 but department = 2"]
+```
+
+The second is a query normalisation. A trailing run of compositions is rewritten to the shortest path
+the equations prove equal to it, so `follow(:manager).follow(:department)` compiles to one join rather
+than two. That optimisation is **derived from the schema rather than guessed at**: nothing reads data,
+statistics, or a hint — it reads a declared equality between two composites and takes the shorter one.
+
+Which makes the caveat exact rather than nervous. The rewrite is sound relative to the **declared
+theory**, which is weaker than sound. An instance that violates the equation answers differently after
+it; so does one where a morphism on the longer path has no value at some element, because the longer
+path drops that element and the shorter one keeps it. That is precisely the standing of a dangling
+foreign key — a failure to be a functor into the presented category — and it is the same bargain,
+reported by the same kind of call and enforced by nothing.
+
 ## 2. Three phases, because they have three different sets of laws
 
 The first draft of this note said ordering and aggregation live outside a regular category, so they
@@ -87,12 +122,29 @@ the discipline extends rather than stopping at the fragment's edge.
 | --- | --- | --- |
 | `follow` | composition in C, then image | `JOIN` … `DISTINCT` |
 | `where` | a **subobject** | `WHERE` |
+| `where_at` / `where_along` | the **pullback** `f*(S)` | `JOIN` … `WHERE`, read from the other side |
 | `select` | **image factorization** | `SELECT DISTINCT` |
 
 Composition, finite limits, and image factorization is a **regular category**. `UNION` needs
 coproducts; `NOT` needs Boolean structure, which is where SQL becomes three-valued logic. There is no
 `join` in the language: a join is what a compiler emits for a composition, and writing one by hand is
 implementing composition by hand.
+
+The pullback is the row that had to be added, and the reason is worth naming because it is not a
+convenience. `follow` composes and therefore moves the carrier to the codomain, so "posts whose author
+lives in tokyo" was unsayable: the composite yields users, and the posts were the thing being asked
+about. For `f : posts → users` and a subobject `S` of users, `f*(S)` is a subobject of *posts*, and
+that is what `where_at(:author, :city, 'tokyo')` builds. It emits the same join a composition emits
+and leaves the carrier where it was — which side of the span the result is read from is the entire
+difference. It is not a fourth primitive: it is `where` formed along a path, and phase one is still
+composition, subobject, image.
+
+The dedupe follows from the same fact rather than from a rule about it. `SELECT DISTINCT` is dropped
+where it is provably redundant: a pullback join is taken along a *function*, so every element has
+exactly one image and the row source cannot repeat a row of the carrier, and with no `follow` at all
+the carrier's key in the output already makes the tuples distinct. Only `follow` gives the image
+factorization work to do, because only `follow` lands on a codomain whose fibres can hold more than
+one element.
 
 ### Phase two: the fold
 
@@ -119,7 +171,7 @@ rules fall straight out and both are build errors:
 
 - **A window needs an order.** `LIMIT` without `ORDER BY` is not a function of the set; it is whatever
   the storage engine felt like. Paginating on one is how rows repeat and vanish between pages.
-- **An order must be total**, or ties break arbitrarily and the two models are free to disagree. So
+- **An order must be total**, or ties break arbitrarily and the models are free to disagree. So
   the identifying fields are appended, and `total_ordering` is what actually runs.
 
 ### What the conformance suite caught
@@ -138,13 +190,20 @@ the pullback, which keeps one row per pair — so folding over the join counts m
 join rather than elements of the image. The image has to be materialised before the fold:
 
 ```sql
-SELECT g.city, COUNT(*) AS people
-FROM (SELECT DISTINCT t1.id, t1.name, t1.city FROM posts t0 JOIN users t1 ON t0.author = t1.id) g
-GROUP BY g.city
+SELECT "g"."city", COUNT(*) AS "people"
+FROM (SELECT DISTINCT "t1"."id", "t1"."name", "t1"."city"
+      FROM "posts" "t0" JOIN "users" "t1" ON "t0"."author" = "t1"."id") "g"
+GROUP BY "g"."city"
 ```
 
-This is the whole argument for the two-model check, arriving on the first extension after it was
-written. One model alone would have been self-consistently wrong.
+This is the whole argument for checking one model against another, arriving on the first extension
+after it was written — back when there were two of them. One model alone would have been
+self-consistently wrong.
+
+Every identifier the compiler emits is quoted, in both SQL models, so a schema is free to name an
+object `order` or an attribute `select`. Values were never the exposure — they are bound — but a
+reserved word interpolated bare is broken SQL, and refusing the name would be the model deciding what
+the schema is allowed to say.
 
 ## 3. The effect signature should be the relational theory, not the application's verbs
 
@@ -207,15 +266,19 @@ node with the same map. So:
 
 Do not skip to the second step. The surface is nicer, and nicer is not a reason to move a pin.
 
-## 5. Two models of one theory — where this stops being philosophy
+## 5. Three models of one theory — where this stops being philosophy
 
-With a fixed signature, the interesting handlers are not stubs:
+With a fixed signature, the interesting handlers are not stubs. What was written here as two is three
+in the code, and the names are these:
 
-- `DB.postgres(pool)` — the real model. `Select` compiles the arrow to SQL.
-- `DB.memory(seed)` — an instance functor `I : C → Set`, literally sets of zeolite `Data` values, where
-  `Select` is evaluated by *computing the pullbacks and subobjects in Set*.
+- `DB.sql(schema, connection)` — the hand-written model. `Select` compiles the arrow to SQL text and
+  binds, with no driver anywhere near it; the port is one method, `execute(sql, binds) -> rows`.
+- `DB.sequel(schema, database)` — the same arrows lowered onto Sequel's expression API, which knows
+  dialects, quoting, pooling, and type mapping. A backend, not a second query language.
+- `DB.memory(schema, seed)` — an instance functor `I : C → Set`, sets of rows, where `Select` is
+  evaluated by *computing the pullbacks and subobjects in Set*.
 
-Both are models of the same finitely presented theory. So a test is no longer "we faked the answer";
+All three are models of the same finitely presented theory. So a test is no longer "we faked the answer";
 it is "we ran the same query in a different model". The upgrade in what determinism *means* is the
 whole point:
 
@@ -228,12 +291,16 @@ three independent lowerings, identically, to survive. That is a conformance
 suite in exactly the sense spec-system already uses — the same posture as `equiv:ruby:check`, and the
 same posture as feeding emitted RBS back to the real `RBS::Parser` instead of asserting on strings.
 
-A framework that claims "the world is a parameter" should be able to *check* that its two worlds are
-the same world. Right now it cannot. This is how it could.
+A framework that claims "the world is a parameter" should be able to *check* that its worlds are the
+same world. This one does: `test/db_conformance_test.rb` is that check, and it runs in the ordinary
+suite rather than in a nightly job somebody stops reading.
 
 ## 6. What this refuses
 
-- **No object-relational mapping.** Rows are zeolite `Data`: frozen, typed, no identity, no behaviour.
+- **No object-relational mapping.** A row is a plain Hash with symbol keys — no identity, no
+  behaviour, nothing to reopen. It is *typed on the way in*, against the same zeolite schema that
+  types a response body, and `Relation#typed` is the door back to a generated `Data` when a caller
+  wants one. What is deliberately absent is the object that owns the row.
 - **No lazy loading.** `post.author.posts` is traversal wearing attribute clothing, and it is how N+1
   becomes invisible. Path composition is written down because composition in C is written down.
 - **No identity map, no dirty tracking, no session.** Those exist to reconcile mutable objects with a
@@ -260,9 +327,12 @@ not reach:
 4. **Isolation levels.** No algebra makes `REPEATABLE READ` true. The transaction handler is sound
    *within* an isolation level, which is a parameter and not a theorem. Say so where it is chosen.
 5. **`Σ_F ⊣ Δ_F ⊣ Π_F` in full.** The adjoint triple is about migration between schemas, and the
-   useful half of it is now built (see `docs/migrations.md`): a step is a functor and both directions
-   are derived, so *reversibility is computed*. What is still absent is the general `Σ`/`Π` — merging
-   and splitting tables — which needs the adjoints proper rather than the six step shapes offered.
+   useful half of it is built (see `docs/migrations.md`): a step is a functor and both directions are
+   derived, so *reversibility is computed*. `Σ_F` is built too — `merge_tables` is the coproduct, the
+   discriminator column is its injection tag, and `split_table` is the decomposition along that tag,
+   which makes eight step shapes rather than six. What is still absent is the right adjoint `Π_F`:
+   folding two tables into one by a *product* over a shared key, a join materialised as a migration.
+   The decomposition is not relabelled `Π` to look complete.
 
 ## 8. The seam this closes
 
