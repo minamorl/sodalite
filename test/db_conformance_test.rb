@@ -28,6 +28,9 @@ class DBConformanceTest < Minitest::Test
     users: { id: :integer, name: :string, city: :string, nickname: :string? },
     posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
   )
+  NULLABLE_SCHEMA = Sodalite::DB.schema(
+    items: { id: :integer, score: :integer?, tag: :string }
+  )
 
   SEED = {
     users: [
@@ -182,6 +185,23 @@ class DBConformanceTest < Minitest::Test
                  @memory.select(query).rows.sort_by { |row| row[:city] })
     assert_equal @memory.select(query), @sql.select(query)
     assert_includes Sodalite::DB::SQL.compile(query).first, 'FROM (SELECT DISTINCT'
+  end
+
+  def test_the_models_agree_after_null_is_explicitly_eliminated
+    seed = [{ id: 1, score: 3, tag: 'kept' }, { id: 2, score: nil, tag: 'removed' },
+            { id: 3, score: 4, tag: 'kept' }]
+    memory = Sodalite::DB.memory(NULLABLE_SCHEMA, items: seed)
+    sql = Sodalite::DB.sql(NULLABLE_SCHEMA, Adapter.new).create_tables!
+    sequel = Sodalite::DB.sequel(NULLABLE_SCHEMA, Sequel.sqlite).create_tables!
+    seed.each { |row| [sql, sequel].each { |model| model.insert(:items, row) } }
+    relation = NULLABLE_SCHEMA[:items].where_present(:score)
+    sum = relation.group(:tag).sum(:score, as: :total)
+    order = relation.order(:score)
+
+    [sql, sequel].each do |model|
+      assert_equal memory.select(sum), model.select(sum)
+      assert_equal memory.select(order), model.select(order)
+    end
   end
 
   def test_a_fold_compiles_to_group_by_and_an_order_to_a_total_order

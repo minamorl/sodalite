@@ -47,6 +47,24 @@ module Sodalite
         raise QueryError, "#{carrier}.#{field} is not nullable, so #{operation} is not a filter"
       end
 
+      # A nullable attribute maps into `A + 1`. Folding or ordering its values
+      # would let each model silently choose how to eliminate the adjoined
+      # point, so the query must first restrict the carrier to `A` explicitly.
+      def check_present!(field, operation)
+        return unless nullable?(field)
+        return if present_fields.include?(field.to_sym)
+
+        raise QueryError,
+              "#{carrier}.#{field} is nullable, so #{operation} needs explicit elimination — " \
+              'use where_present first'
+      end
+
+      def check_order_present!(field)
+        return if grouped? && aggregates.any? { |aggregate| aggregate.name == field.to_sym }
+
+        check_present!(field, :order)
+      end
+
       def check_unionable!(other)
         raise QueryError, 'a union needs two arrows over the same carrier' unless other.carrier == carrier
         raise QueryError, 'a union of grouped or ordered arrows is not a relation' if
