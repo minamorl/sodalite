@@ -120,6 +120,20 @@ class DBConformanceEdgesTest < Minitest::Test
     'a fold along a string-keyed morphism' => ->(s) { s[:users].group(:city).count(:people) },
     'the whole pipeline over a string key' => lambda { |s|
       s[:posts].follow(:author).where_at(:city, :country, 'jp').group(:city).count(:people)
+    },
+
+    # An order over `A + 1`, over the numeric column this presentation can say it
+    # with. `min` over the osaka fibre — nothing the whole way down — folds to the
+    # identity the monoid adjoined, and ordering that result is ordering an
+    # element no `?` in the schema named. Its placement is stated: after every
+    # element of `A`, in both directions.
+    'an order over a nullable column' => ->(s) { s[:users].order(:score) },
+    'an order over a nullable column descending' => ->(s) { s[:users].order(:score, :desc) },
+    'an order over a fold of a fibre that is entirely nothing' => lambda { |s|
+      s[:users].group(:city).min(:score, as: :lowest).order(:lowest)
+    },
+    'an order over a fold of a fibre that is entirely nothing, descending' => lambda { |s|
+      s[:users].group(:city).min(:score, as: :lowest).order(:lowest, :desc)
     }
   }.freeze
 
