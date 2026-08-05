@@ -70,7 +70,7 @@ module Sodalite
         check_fragment_open!(:follow)
         check_not_united!(:follow)
         target = schema.target_of(carrier, fk)
-        with(carrier: target, steps: (steps + [[:follow, fk.to_sym, target]]).freeze)
+        with(carrier: target, steps: normalised(steps + [[:follow, fk.to_sym, target]]))
       end
 
       # A subobject of the current carrier.
@@ -200,6 +200,50 @@ module Sodalite
 
       def to_s
         "#{root}#{steps.map { |kind, *rest| ".#{kind}(#{rest.first})" }.join}"
+      end
+
+      private
+
+      # The trailing run of compositions, rewritten to the shortest path the
+      # schema's equations prove equal to it.
+      #
+      # This is an optimisation **derived from the schema rather than guessed
+      # at**: nothing here reads data, statistics, or a hint. It reads a
+      # declared equality between two composites and takes the shorter one.
+      #
+      # And it is sound relative to the *declared theory*, which is weaker than
+      # sound. An instance that violates the equation answers differently after
+      # the rewrite; so does one where a morphism on the longer path has no
+      # value at some element, because the longer path drops that element and
+      # the shorter one keeps it. That is the exact standing of a dangling
+      # foreign key — a failure to be a functor into the presented category —
+      # and it is reported the same way, by `equation_violations` on every
+      # model, and enforced by nothing.
+      #
+      # Only the trailing run is looked at, and only a suffix of it. A `where`
+      # between two compositions was taken on the object the run had reached, so
+      # rewriting across it would move that subobject to a different object.
+      #
+      # The carrier cannot move: construction refused any equation whose sides
+      # arrive at different objects, so a rewritten path ends where the original
+      # did. And only a composition moves the carrier at all, which is why the
+      # run starts at the codomain of the last one before it, or at the root.
+      def normalised(walk)
+        return walk.freeze if schema.equations.empty?
+
+        run = walk.reverse.take_while { |kind, _| kind == :follow }.reverse
+        head = walk.first(walk.size - run.size)
+        (head + hops(head.reverse.find { |kind, _| kind == :follow }&.last || root, run)).freeze
+      end
+
+      # The run, rewritten to the shortest path the equations prove equal to it,
+      # as the steps that walk it. Each rebuilt step records its own codomain,
+      # which is what lets an evaluator read the carrier off the steps instead
+      # of deriving it again.
+      def hops(from, run)
+        path = schema.normalise_path(from, run.map { |_, fk| fk })
+        objects = schema.path_objects(from, path)
+        path.each_with_index.map { |fk, hop| [:follow, fk, objects[hop + 1]] }
       end
     end
   end

@@ -129,6 +129,73 @@ module Sodalite
         @store[target].to_set { |row| row[key] }
       end
 
+      # --- the path equations, checkable --------------------------------------
+      # A dangling key is a failure to be a functor at all. An equation is a
+      # condition on the functor once it is one, and it is the condition SQL
+      # cannot hold for you: a foreign key relates a column to a key, never a
+      # path to a path, so `employee.manager.department = employee.department`
+      # has nowhere to live except the presentation.
+      #
+      # Reported, not enforced, for the same reason `functor?` is. `insert` does
+      # not check it and no `CHECK` is emitted, so an instance can stop
+      # satisfying a declared equation between two writes, and this says so when
+      # the caller asks.
+      #
+      # An element where either composite has no image is **not** reported. Some
+      # hop had no value, or landed on no row, so neither side is defined there
+      # and an equation between two undefined composites says nothing. That
+      # element is already reported — by `violations`, because a morphism with
+      # no value at an element *is* a dangling foreign key — and saying it twice
+      # in two vocabularies would make one broken row look like two independent
+      # failures. It is also the reading the other two models get for free: an
+      # inner join drops an element with no image, and `<>` over a NULL is
+      # UNKNOWN, so all three land on the same set without being talked into it.
+      def satisfies_equations?
+        equation_violations.empty?
+      end
+
+      def equation_violations
+        @schema.equations.flat_map { |equation| unequal(equation) }
+      end
+
+      def unequal(equation)
+        key = @schema.table(equation.from).key
+        @store[equation.from].filter_map do |row|
+          left = composite(equation.from, equation.left, row)
+          right = composite(equation.from, equation.right, row)
+          next if left.nil? || right.nil? || left == right
+
+          @schema.equation_message(equation, row[key], left, right)
+        end
+      end
+
+      # The value of a composite at one element, or nil where it has none.
+      #
+      # A path of length n is n-1 lookups and then a column read: the last
+      # morphism is the value the equation compares, and the ones before it are
+      # how the row carrying it is reached. The empty path is the identity, so
+      # its value is the element's own key.
+      def composite(from, path, row)
+        return row[@schema.table(from).key] if path.empty?
+
+        objects = @schema.path_objects(from, path)
+        value = row[path.first]
+        path.drop(1).each_with_index do |fk, hop|
+          element = element_at(objects[hop + 1], value)
+          return nil unless element
+
+          value = element[fk]
+        end
+        value
+      end
+
+      def element_at(object, value)
+        return nil if value.nil?
+
+        key = @schema.table(object).key
+        @store[object].find { |row| row[key] == value }
+      end
+
       # --- evaluation ---------------------------------------------------------
 
       def select(query)

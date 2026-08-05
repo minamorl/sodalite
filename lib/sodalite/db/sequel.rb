@@ -91,6 +91,37 @@ module Sodalite
                        .map { |value| @schema.dangling_message(table.name, field, value, target) }
       end
 
+      # --- the path equations, checkable --------------------------------------
+      # A dangling key is a failure to be a functor; a path equation is a
+      # condition on the functor once it is one, and it is the one SQL cannot
+      # hold — a foreign key relates a column to a key, never a path to a path.
+      # So it is declared in the presentation, and asked about here.
+      #
+      # Reported, not enforced, exactly as `functor?` is, and an element with no
+      # image on either side is not reported: the join has no row for it, or the
+      # comparison is over a NULL and is UNKNOWN. The model that walks rows in
+      # Set is brought to that same reading rather than the other way round, so
+      # the three agree about which elements the equation has anything to say
+      # about.
+      def satisfies_equations?
+        equation_violations.empty?
+      end
+
+      def equation_violations
+        @schema.equations.flat_map { |equation| unequal(equation) }
+      end
+
+      # The two columns are aliased before they are read back. Both sides of an
+      # equation usually end in the *same* morphism name — that is what makes it
+      # an equation worth declaring — so a row keyed by column name would hand
+      # back one value twice.
+      def unequal(equation)
+        rows, columns = equation_dataset(equation)
+        key = column(:t0, @schema.table(equation.from).key)
+        rows.select_map([key.as(:element), columns.first.as(:one), columns.last.as(:other)])
+            .map { |element, one, other| @schema.equation_message(equation, element, one, other) }
+      end
+
       # --- reading ------------------------------------------------------------
 
       def select(query)
@@ -220,6 +251,49 @@ module Sodalite
       end
 
       private
+
+      # Both sides of one equation in one dataset. Their aliases come from a
+      # single supply, or the second side's joins would name the rows the first
+      # side's already named and both columns would be read off the same row.
+      #
+      # `exclude` is `NOT (a = b)`, which over a NULL is UNKNOWN and drops the
+      # row — the same three-valued reading `<>` gives the hand-written model,
+      # and the same set the in-memory one computes by refusing to compare an
+      # undefined composite.
+      def equation_dataset(equation)
+        from = equation.from
+        left = hops_along(from, equation.left, 1)
+        right = hops_along(from, equation.right, 1 + left.size)
+        columns = [side_column(from, equation.left, left), side_column(from, equation.right, right)]
+        [joined(from, left + right).exclude(columns.first => columns.last), columns]
+      end
+
+      # The source object, with every hop both sides take joined onto it.
+      def joined(from, hops)
+        hops.reduce(@db[::Sequel[from].as(:t0)]) { |dataset, hop| join_hop(dataset, hop) }
+      end
+
+      # The joins one side takes: a path of length n is n-1 of them, because the
+      # last morphism is the column being compared rather than a row to reach.
+      def hops_along(from, path, first)
+        objects = @schema.path_objects(from, path)
+        path[0..-2].each_with_index.map do |fk, hop|
+          [objects[hop + 1], :"t#{first + hop}", hop.zero? ? :t0 : :"t#{first + hop - 1}", fk]
+        end
+      end
+
+      # The column a composite ends at. An empty path is the identity, so it is
+      # the source's own key.
+      def side_column(from, path, hops)
+        return column(:t0, @schema.table(from).key) if path.empty?
+
+        column(hops.empty? ? :t0 : hops.last[1], path.last)
+      end
+
+      def join_hop(dataset, hop)
+        target, name, source, fk = hop
+        dataset.join(::Sequel[target].as(name), @schema.table(target).key => column(source, fk))
+      end
 
       def distinct_values(table, field)
         @db[table].distinct.select_map(field)

@@ -78,21 +78,69 @@ module Sodalite
       private :column_types
     end
 
+    # One path equation of the presentation: two composites out of the same
+    # object, declared equal.
+    #
+    # The source is named rather than inferred from the first morphism. Two
+    # objects can both carry a `manager`, so an inferred source would be a guess
+    # at which one was meant, and a guess in a presentation is a different
+    # category.
+    #
+    # An empty path is **allowed**, and it is the identity: `[:employees,
+    # %i[manager], []]` says every employee is their own manager. That is a real
+    # constraint, and the composite has a value at every element — the element's
+    # own key — so refusing it would be refusing an arrow of the category for
+    # being short. Everything downstream reads it that way: the diagnostic
+    # compares against the key column, and a rewrite onto an empty side drops
+    # the composition entirely, which is exactly what `manager = id` means.
+    Equation = Data.define(:from, :left, :right) do
+      # A rewrite runs longer -> shorter. Two sides of the same length prove
+      # nothing about length, so `Schema#shorter_path` derives nothing from them
+      # rather than swapping one for the other forever.
+      def longer = left.size >= right.size ? left : right
+      def shorter = left.size >= right.size ? right : left
+      def shrinking? = left.size != right.size
+
+      def left_name = name(left)
+      def right_name = name(right)
+
+      def to_s = "#{from}.#{left_name} = #{from}.#{right_name}"
+
+      private
+
+      # The identity is spelled by the key, because the key is the column a
+      # model actually reads for it.
+      def name(path) = (path.empty? ? [Table::KEY] : path).join('.')
+    end
+
     # The schema category, finitely presented: objects are tables, morphisms are
-    # foreign keys, and the one path equation enforced here is referential
-    # integrity — which is not a rule about rows but the condition for an
-    # instance to be a functor at all.
+    # foreign keys, and `equations` are the path equations — pairs of composites
+    # the presentation declares equal.
+    #
+    # Without them this was the free category on a graph, which is a weaker
+    # claim rather than a smaller one: in a free category no two distinct paths
+    # are ever equal, so `employee.manager.department = employee.department`
+    # could not be said at all. That constraint is not sayable to SQL either —
+    # a foreign key relates one column to one key, never one path to another —
+    # which is why it belongs to the presentation and not to the DDL.
+    #
+    # Referential integrity is the condition for an instance to be a functor at
+    # all, and `violations` reports it. An equation is a condition on that
+    # functor once it exists, and `equation_violations` reports it. Neither is
+    # enforced; both are properties an instance has or does not.
     class Schema
-      attr_reader :tables
+      attr_reader :tables, :equations
 
       # Wiring the objects together is where a foreign key column gets its type:
       # it carries the target's key, and only the whole presentation knows what
-      # that key is.
-      def initialize(spec)
+      # that key is. The equations are judged after that, because a path is only
+      # a path once every morphism in it has a codomain.
+      def initialize(spec, equations: [])
         resolved = resolve(spec)
         @tables = spec.to_h do |name, fields|
           [name.to_sym, Table.new(name, fields, foreign_key_types: resolved.fetch(name.to_sym))]
         end.freeze
+        @equations = equations.map { |from, left, right| equation!(from, left, right) }.freeze
         freeze
       end
 
@@ -126,7 +174,96 @@ module Sodalite
         "#{table_name}.#{field}=#{value.inspect} has no #{target}"
       end
 
+      # And how a model spells an element where a declared equation does not
+      # hold. Same reason it lives here: three models compute the two composites
+      # three different ways — a walk in Set, a join, a dataset — and one broken
+      # element has to come back as one sentence, or the agreement between them
+      # is a claim nobody can check by reading it.
+      def equation_message(equation, element, left, right)
+        "#{equation.from}.#{table(equation.from).key}=#{element.inspect}: " \
+          "#{equation.left_name} = #{left.inspect} but #{equation.right_name} = #{right.inspect}"
+      end
+
+      # The objects a path visits, `objects[i]` being the domain of `path[i]`.
+      # A walk that has to name the row a hop lands on reads it off here rather
+      # than re-deriving the chain each time it takes a step.
+      def path_objects(from, path)
+        path.each_with_object([from.to_sym]) { |fk, visited| visited << target_of(visited.last, fk) }
+      end
+
+      # The shortest path the declared equations prove equal to this one.
+      #
+      # Naive on purpose: only a suffix is matched, only a strictly shorter side
+      # is written back, and the answer is fed through again so a chain of
+      # equations can collapse more than once. An equation whose sides are the
+      # same length is skipped — it proves nothing about length, and rewriting
+      # one side onto the other would shrink nothing and could be undone by the
+      # same equation forever. That skip is what makes this terminate: every
+      # rewrite drops at least one hop.
+      def normalise_path(from, path)
+        loop do
+          shorter = shorter_path(from, path)
+          return path unless shorter
+
+          path = shorter
+        end
+      end
+
       private
+
+      # A suffix match. The tail of the path is the equation's longer side *and*
+      # the object that tail starts at is the object the equation was declared
+      # out of — two objects can carry the same morphism name, so the object is
+      # half of the match rather than a detail of it.
+      def shorter_path(from, path)
+        objects = path_objects(from, path)
+        equation = @equations.find { |candidate| rewrites?(candidate, objects, path) }
+        equation && (path.first(path.size - equation.longer.size) + equation.shorter)
+      end
+
+      def rewrites?(equation, objects, path)
+        size = equation.longer.size
+        equation.shrinking? && size <= path.size &&
+          objects[path.size - size] == equation.from && path.last(size) == equation.longer
+      end
+
+      # A declared equation is judged the moment it is made, for the same reason
+      # a morphism's type is: an equation naming a morphism that does not exist
+      # is not a constraint that fails later, it is a sentence about some other
+      # category. Every refusal spells both sides, because which of the two is
+      # wrong is the whole of what is being reported.
+      def equation!(from, left, right)
+        equation = Equation.new(from: from.to_sym, left: path!(left), right: path!(right))
+        raise SchemaError, "#{equation}: no table #{equation.from.inspect}" unless @tables.key?(equation.from)
+
+        same_codomain!(equation)
+        equation
+      end
+
+      # Two paths that arrive at different objects are not two spellings of one
+      # morphism, so there is no hom-set for them to be equal in.
+      def same_codomain!(equation)
+        ends = [equation.left, equation.right].map { |path| codomain(equation, path) }
+        return if ends.first == ends.last
+
+        raise SchemaError, "#{equation}: #{equation.left_name} arrives at #{ends.first}, " \
+                           "#{equation.right_name} at #{ends.last}"
+      end
+
+      def path!(path)
+        Array(path).map(&:to_sym).freeze
+      end
+
+      # The object a path arrives at. Each name has to be a morphism out of the
+      # object reached so far, or the path is not a path in this category and
+      # the equation is about nothing.
+      def codomain(equation, path)
+        path.reduce(equation.from) do |object, fk|
+          target_of(object, fk)
+        rescue SchemaError
+          raise SchemaError, "#{equation}: #{object} has no morphism #{fk.inspect}"
+        end
+      end
 
       # Every morphism is resolved across the whole presentation before a single
       # object is built from it. That is what lets one point forward, or at its

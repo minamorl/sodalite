@@ -72,8 +72,13 @@ module Sodalite
       # difference between it and a composition, and this field is where that
       # difference lives.
       Clauses = Data.define(:aliases, :carrier, :joins, :wheres, :binds) do
-        def self.for(query)
-          root = [query.root, 't0']
+        def self.for(query) = at(query.root)
+
+        # A path equation is checked at an object rather than along an arrow, so
+        # the walk starts from the object itself. The accumulators are the same
+        # ones either way, because a join is a join.
+        def self.at(object)
+          root = [object, 't0']
           new(aliases: [root], carrier: root, joins: [], wheres: [], binds: [])
         end
 
@@ -115,7 +120,7 @@ module Sodalite
       # fields and the filters that come after are read off the joined table.
       def follow(query, clauses, step)
         fk, target = step
-        clauses.with(carrier: join(query, clauses, clauses.carrier, fk, target))
+        clauses.with(carrier: join(query.schema, clauses, clauses.carrier, fk, target))
       end
 
       # The pullback `f*(S)`. It emits the join a composition emits and then
@@ -126,20 +131,53 @@ module Sodalite
       def pullback(query, clauses, step)
         paths, field, operand, operator = step
         far = paths.reduce(clauses.carrier) do |source, fk|
-          join(query, clauses, source, fk, query.schema.target_of(source[0], fk))
+          join(query.schema, clauses, source, fk, query.schema.target_of(source[0], fk))
         end
         filter(clauses, far[1], [field, operand, operator])
       end
 
       # `JOIN target ON source.fk = target.key`, and the pair the target is
-      # reached by. Composition and the pullback emit the same join; they differ
-      # only in whether the carrier follows it.
-      def join(query, clauses, source, fk, target)
-        key = query.schema.table(target).key
+      # reached by. Composition, the pullback, and a path equation's side all
+      # emit the same join; they differ only in what is read off it afterwards,
+      # so it takes the schema rather than an arrow.
+      def join(schema, clauses, source, fk, target)
+        key = schema.table(target).key
         target_alias = clauses.hop(target)
         clauses.joins << " JOIN #{quote(target)} #{quote(target_alias)} " \
                          "ON #{qualify(source[1], fk)} = #{qualify(target_alias, key)}"
         [target, target_alias]
+      end
+
+      # Both composites of one path equation, and the elements where they
+      # disagree, in one statement.
+      #
+      # A path of length n is n-1 joins and then a column read: the last
+      # morphism is the value being compared, and the ones before it are how the
+      # row carrying it is reached. The two sides draw aliases from one supply,
+      # or the second would read its column off the rows the first joined.
+      #
+      # An element whose composite has no image on either side falls out on its
+      # own, and that is deliberate rather than convenient: the join drops an
+      # element whose morphism has no value, and `<>` over a NULL is UNKNOWN. It
+      # is the reading the other two models are held to, and here it is free.
+      def equation_statement(schema, equation)
+        clauses = Clauses.at(equation.from)
+        left = side(schema, clauses, equation, equation.left)
+        right = side(schema, clauses, equation, equation.right)
+        key = qualify(clauses.root_alias, schema.table(equation.from).key)
+        "SELECT #{key}, #{left}, #{right} FROM #{quote(equation.from)} #{quote(clauses.root_alias)}" \
+          "#{clauses.joins.join} WHERE #{left} <> #{right}"
+      end
+
+      # One side of an equation, as the column its composite ends at. An empty
+      # path is the identity, so the column is the source's own key.
+      def side(schema, clauses, equation, path)
+        return qualify(clauses.root_alias, schema.table(equation.from).key) if path.empty?
+
+        far = path[0..-2].reduce(clauses.aliases.first) do |source, fk|
+          join(schema, clauses, source, fk, schema.target_of(source[0], fk))
+        end
+        qualify(far[1], path.last)
       end
 
       def filter(clauses, table_alias, step)
@@ -371,6 +409,38 @@ module Sodalite
       def keys_of(target)
         key = @schema.table(target).key
         select(@schema[target].select(key)).to_set { |row| row[key] }
+      end
+
+      # --- the path equations, checkable --------------------------------------
+      # The condition a foreign key cannot carry: it relates a column to a key,
+      # never a path to a path. So `employee.manager.department =
+      # employee.department` is declared in the presentation, and measured here.
+      #
+      # Reported, not enforced — the same standing as referential integrity, and
+      # for the same reason. Nothing calls this on `insert` and the DDL emits no
+      # `CHECK`; an instance either satisfies the equation or does not, and this
+      # is how it is asked.
+      #
+      # An element with no image on either side is not reported: it falls out of
+      # the join, or out of `<>` over a NULL, and it is already reported as a
+      # dangling key. `Memory` is brought to the same reading deliberately, so
+      # the three agree about which elements have anything to say.
+      def satisfies_equations?
+        equation_violations.empty?
+      end
+
+      def equation_violations
+        @schema.equations.flat_map { |equation| unequal(equation) }
+      end
+
+      # One statement per equation, and not an arrow: the comparison is between
+      # two columns, and `where` compares an attribute to a value. That is
+      # exactly what makes this constraint unsayable as an arrow, and worth
+      # putting in the presentation instead.
+      def unequal(equation)
+        @connection.execute(SQL.equation_statement(@schema, equation), []).map do |element, left, right|
+          @schema.equation_message(equation, element, left, right)
+        end
       end
 
       # --- migration ----------------------------------------------------------

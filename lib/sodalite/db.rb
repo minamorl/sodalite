@@ -51,8 +51,17 @@ module Sodalite
 
     module_function
 
-    def schema(spec)
-      Schema.new(spec)
+    # `equations:` are the path equations of the presentation — see `Schema`.
+    # None is the free category on the graph of foreign keys, which is exactly
+    # what every schema declared before this was, so leaving them off changes
+    # nothing.
+    #
+    # The spec may be written braced or bare, because bare is how every existing
+    # schema is spelled and a keyword argument turns a bare trailing hash into
+    # keywords. The one name that costs is `equations` itself: an object called
+    # that has to be declared inside braces, where it is a table again.
+    def schema(spec = nil, equations: [], **tables)
+      Schema.new(spec || tables, equations: equations)
     end
 
     def fk(target)
