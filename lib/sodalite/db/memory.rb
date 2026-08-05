@@ -122,6 +122,7 @@ module Sodalite
         keys = keys_of(target)
         @store[table.name].reject { |row| keys.include?(row[field]) }
                           .map { |row| @schema.dangling_message(table.name, field, row[field], target) }
+                          .sort
       end
 
       # One scan of the target per morphism, not per element of its domain:

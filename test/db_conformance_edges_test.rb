@@ -419,3 +419,57 @@ class DBConformanceRefusedStepStorageTest < Minitest::Test
     end
   end
 end
+
+# A dangling morphism is not one fact about a value, it is one failure of the
+# functor *at each element*. Two elements pointing at one missing key are two
+# failures, and a model that deduplicates them answers a different question —
+# `violations.size` stops being "how far from being a functor this instance is".
+#
+# The three readings are a walk over a Hash, one anti-join statement, and a
+# dataset with an explicit null arm. They agree on the multiplicity and on the
+# order, because the order is taken on the sentence rather than on the storage.
+class DBConformanceDanglingMultiplicityTest < Minitest::Test
+  SCHEMA = Sodalite::DB.schema(
+    users: { id: :integer, name: :string },
+    posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
+  )
+
+  def setup
+    skip 'sqlite3 unavailable' unless EDGES_SQLITE
+
+    @models = [Sodalite::DB.memory(SCHEMA),
+               Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables_for_test!,
+               Sodalite::DB.sequel(SCHEMA, Sequel.sqlite).create_tables_for_test!]
+    @models.each do |model|
+      model.insert(:users, { id: 1, name: 'mina' })
+      [[10, 99], [11, 99], [12, 98], [13, 1]].each do |id, author|
+        model.insert(:posts, { id: id, title: 'post', author: author })
+      end
+    end
+  end
+
+  def test_every_model_counts_a_broken_morphism_once_per_element
+    expected = ['posts.author=98 has no users',
+                'posts.author=99 has no users',
+                'posts.author=99 has no users']
+
+    @models.each do |model|
+      assert_equal expected, model.violations, model.class.name
+      refute_predicate model, :functor?, model.class.name
+    end
+  end
+
+  def test_every_model_calls_an_instance_with_no_broken_morphism_a_functor
+    @models.each do |model|
+      assert_equal 3, model.delete(SCHEMA[:posts].where(:author, :gte, 98)), model.class.name
+
+      assert_empty model.violations, model.class.name
+      assert_predicate model, :functor?, model.class.name
+    end
+  end
+
+  class Adapter
+    def initialize = @db = SQLite3::Database.new(':memory:')
+    def execute(sql, binds) = @db.execute(sql, binds)
+  end
+end

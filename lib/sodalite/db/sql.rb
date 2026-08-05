@@ -357,7 +357,11 @@ module Sodalite
       # reading the model that evaluates in Set has.
       def dangling_statement(schema, table, field, target)
         column = quote(field)
-        "SELECT DISTINCT #{column} FROM #{quote(table.name)} " \
+        # Not `DISTINCT`: the morphism fails to have a value *at an element*,
+        # so two elements pointing at one missing key are two failures of the
+        # functor and not one. The multiplicity is the count of broken elements,
+        # which is what "how far from being a functor" means.
+        "SELECT #{column} FROM #{quote(table.name)} " \
           "WHERE #{column} NOT IN (SELECT #{quote(schema.table(target).key)} FROM #{quote(target)}) " \
           "OR #{column} IS NULL"
       end

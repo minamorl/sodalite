@@ -89,6 +89,7 @@ module Sodalite
         keys = @db[target].select(@schema.table(target).key)
         @db[table.name].exclude(field => keys).or(field => nil).select_map(field)
                        .map { |value| @schema.dangling_message(table.name, field, value, target) }
+                       .sort
       end
 
       # --- the path equations, checkable --------------------------------------
