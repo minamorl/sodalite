@@ -279,3 +279,42 @@ class DBSequelTest < Minitest::Test
     assert_equal 1, @model.delete(SCHEMA[:posts].where(:id, 13))
   end
 end
+
+# An index survives `RENAME TO` under the name it was created with, so a renamed
+# object used to keep indexes named after the object it had been — a name nothing
+# could compute again, and one a later object taking the freed name collided
+# with. Both SQL models now carry the indexes across, and to the same names.
+class DBSequelRenameIndexTest < Minitest::Test
+  RENAMED = Sodalite::DB.history(
+    [:create_table, :users, { id: :integer, name: :string }],
+    [:create_table, :posts, { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }],
+    [:rename_table, :posts, :writings]
+  )
+
+  def setup
+    skip 'sqlite3 unavailable' unless SEQUEL_MODEL_SQLITE
+
+    @db = Sequel.sqlite
+    Sodalite::DB.sequel(Sodalite::DB::Schema.new({}), @db).migrate!(RENAMED)
+  end
+
+  def test_a_renamed_object_carries_its_indexes_to_names_that_can_be_computed_again
+    assert_equal %i[index_writings_on_author], @db.indexes(:writings).keys
+    refute @db.table_exists?(:posts)
+  end
+
+  # The name is one rule in one place, so the two SQL models cannot drift about
+  # what a renamed object's indexes are called.
+  def test_both_sql_models_name_the_carried_index_the_same_way
+    connection = MigrationAdapter.new
+    Sodalite::DB.sql(Sodalite::DB::Schema.new({}), connection).migrate!(RENAMED)
+    hand_written = connection.execute('PRAGMA index_list("writings")', []).map { |row| row[1] }
+
+    assert_equal hand_written.map(&:to_sym), @db.indexes(:writings).keys
+  end
+
+  class MigrationAdapter
+    def initialize = @db = SQLite3::Database.new(':memory:')
+    def execute(sql, binds) = @db.execute(sql, binds)
+  end
+end

@@ -17,7 +17,7 @@ module Sodalite
         case step.kind
         when :create_table then create_table(@schema.table(table))
         when :drop_table then @db.drop_table(table)
-        when :rename_table then @db.rename_table(table, rest[0])
+        when :rename_table then rename_table(table, rest[0])
         when :merge_tables then merge_tables(table, rest[0], rest[1])
         when :split_table then split_table(table, rest[0], rest[1])
         else alter(step, table, rest)
@@ -69,6 +69,21 @@ module Sodalite
         @db.drop_table(table)
       end
 
+      # An index survives `RENAME TO` under the name it was created with, so a
+      # renamed object keeps indexes named after the object it used to be —
+      # names nothing can compute again, and names a later object taking the
+      # freed name collides with. Sequel does not carry them across either, so
+      # they are dropped and re-declared, which is what the hand-written model
+      # emits for the same step.
+      def rename_table(before, renamed)
+        @db.rename_table(before, renamed)
+        table = @schema.table(renamed)
+        table.foreign_keys.each_key do |field|
+          @db.drop_index(renamed, field, name: index_name(before, field))
+          @db.add_index(renamed, field, name: index_name(renamed, field))
+        end
+      end
+
       def create_table(table)
         key = table.key
         columns = table.fields.map { |field| [field, type_of(table, field)] }
@@ -85,10 +100,11 @@ module Sodalite
       # spells it inside `create_table` and emits its own `CREATE INDEX` after the
       # table, which is what a backend that cannot put one inline needs.
       #
-      # The name is spelled rather than left to the adapter, because a name the
-      # backend invents is a name the other models cannot agree with.
+      # The name is not spelled here. A name the backend invents is a name the
+      # other models cannot agree with, and a name spelled twice is a name that
+      # can drift — so both readings come from the one rule in `SQL`.
       def index_name(table, field)
-        :"index_#{table}_on_#{field}"
+        SQL.index_name(DDL::Named.new(name: table), field).to_sym
       end
 
       # A foreign key column holds the target's key, so its type is the target's
