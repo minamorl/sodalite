@@ -1,0 +1,70 @@
+name: iolite-review
+
+# Adversarial AI code review via minamorl/iolite.
+#
+# Advisory only. ci.yml (rake test + rubocop + gem build across Ruby
+# 3.2/3.3/3.4/4.0) remains the real gate; this reads the diff and comments.
+#
+# The runtime lives in minamorl/iolite; this repo owns only the review policy
+# (.github/iolite/prompt.md).
+#
+# Skip a review: put [skip-ai-review] in the PR body or a commit message.
+# Re-review the same commit: comment `/review force`.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+concurrency:
+  group: iolite-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: |
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        !contains(github.event.pull_request.body, '[skip-ai-review]')
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '/review')
+      ) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run iolite
+        uses: minamorl/iolite@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          project_name: sodalite
+          prompt_file: .github/iolite/prompt.md
+          include_paths: |
+            lib/
+            test/
+            examples/
+            sodalite.gemspec
+            Rakefile
+            .github/workflows/
+          exclude_paths: |
+            Gemfile.lock
+          pr_number: ${{ github.event.inputs.pr_number }}
