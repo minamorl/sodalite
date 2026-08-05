@@ -28,9 +28,10 @@ class DBHistoryTest < Minitest::Test
     assert_equal %i[id title author], HISTORY.schema.table(:posts).fields
   end
 
-  def test_a_version_is_how_far_along_the_composite_a_database_got
+  def test_a_version_is_how_far_along_the_solved_composite_a_database_got
     assert_equal %i[id name], HISTORY.schema_at(1).table(:users).fields
-    assert_equal %i[id name city], HISTORY.schema_at(2).table(:users).fields
+    assert_equal %i[users posts], HISTORY.schema_at(2).names
+    assert_equal %i[id name city], HISTORY.schema_at(3).table(:users).fields
   end
 
   # Losing information is exactly what a non-injective map does, so the question
@@ -64,8 +65,8 @@ class DBHistoryTest < Minitest::Test
     assert_equal before, rename.inverse(before).apply(after)
   end
 
-  def test_a_composite_that_does_not_typecheck_fails_at_declaration
-    assert_raises(KeyError) do
+  def test_a_composite_with_an_unprovided_requirement_fails_at_declaration
+    assert_raises(Sodalite::DB::MigrationError) do
       Sodalite::DB.history([:add_attribute, :ghosts, :name, :string, ''])
     end
   end

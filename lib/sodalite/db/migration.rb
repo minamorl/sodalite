@@ -211,7 +211,7 @@ module Sodalite
         end
         @plan = Plan.new(@steps, presentations)
         # The composite and the solved order both fail at declaration, never on a request path.
-        spec_at(@steps.size)
+        spec_at(size)
         freeze
       end
 
@@ -220,7 +220,9 @@ module Sodalite
       end
 
       def spec_at(version)
-        @steps.first(version).reduce({}) { |spec, step| step.apply(spec) }
+        # A version counts the solved order, not declaration positions. The
+        # ledger is content-addressed, and rollback uses the same prefix.
+        @plan.order.first(version).reduce({}) { |spec, step| step.apply(spec) }
       end
 
       def schema_at(version)
