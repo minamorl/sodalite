@@ -182,23 +182,32 @@ class DBMigrationConformanceTest < Minitest::Test
     assert_includes @sql.applied, edited.steps.last.fingerprint
   end
 
-  # What the Sequel backend actually buys, measured rather than assumed. The
-  # hand-written model interpolates identifiers bare and spells an offset the way
-  # SQLite does; Sequel quotes and knows the dialect.
-  def test_the_sequel_backend_quotes_identifiers_the_hand_written_one_does_not
+  # What the Sequel backend actually buys, measured rather than assumed — and
+  # quoting is no longer on the list. A schema is allowed to name an object
+  # `order` and an attribute `select`, so both models route every identifier
+  # through a quoter. What is left to Sequel is knowing which quoter a given
+  # dialect wants, and that is a backend's job rather than a compiler's.
+  def test_both_backends_quote_a_reserved_word_the_same_way
     reserved = Sodalite::DB.schema(order: { id: :integer, select: :string })
     sequel = Sodalite::DB.sequel(reserved, Sequel.sqlite).create_tables!
-    sequel.insert(:order, { id: 1, select: 'x' })
+    sql = Sodalite::DB.sql(reserved, Adapter.new).create_tables!
+    [sequel, sql].each { |model| model.insert(:order, { id: 1, select: 'x' }) }
+    query = reserved[:order].where(:select, 'x')
 
-    assert_equal [{ id: 1, select: 'x' }], sequel.select(reserved[:order].where(:select, 'x')).rows
-    assert_includes Sodalite::DB::SQL.compile(reserved[:order].where(:select, 'x')).first, 'FROM order t0'
+    assert_equal [{ id: 1, select: 'x' }], sequel.select(query).rows
+    assert_equal [{ id: 1, select: 'x' }], sql.select(query).rows
+    assert_includes Sodalite::DB::SQL.compile(query).first, 'FROM "order" "t0"'
   end
 
-  def test_a_reserved_table_name_breaks_the_hand_written_backend
+  # It used to raise: `CREATE TABLE order (...)` is a syntax error and the model
+  # spelled the name bare. The limitation was real and is gone, so the assertion
+  # says the new truth rather than being deleted along with it.
+  def test_a_reserved_table_name_no_longer_breaks_the_hand_written_backend
     reserved = Sodalite::DB.schema(order: { id: :integer, select: :string })
-    sql = Sodalite::DB.sql(reserved, Adapter.new)
+    sql = Sodalite::DB.sql(reserved, Adapter.new).create_tables!
+    sql.insert(:order, { id: 1, select: 'x' })
 
-    assert_raises(SQLite3::SQLException) { sql.create_tables! }
+    assert_equal [{ id: 1, select: 'x' }], sql.select(reserved[:order]).rows
   end
 
   # Every model carries the coproduct the same way: one disjoint union of

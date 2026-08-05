@@ -24,9 +24,13 @@ end
 # Three independent lowerings of one meaning — a bug would have to occur in all
 # three, identically, to survive.
 class DBConformanceTest < Minitest::Test
+  # `comments -> posts -> users` is the shortest presentation with a path of
+  # length two in it, which is what a pullback along more than one morphism
+  # needs to have anything to walk.
   SCHEMA = Sodalite::DB.schema(
     users: { id: :integer, name: :string, city: :string, nickname: :string? },
-    posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }
+    posts: { id: :integer, title: :string, author: Sodalite::DB.fk(:users) },
+    comments: { id: :integer, body: :string, post: Sodalite::DB.fk(:posts) }
   )
 
   SEED = {
@@ -39,6 +43,11 @@ class DBConformanceTest < Minitest::Test
       { id: 10, title: 'hello', author: 1 },
       { id: 11, title: 'again', author: 1 },
       { id: 12, title: 'hello', author: 2 }
+    ],
+    # One comment on each side of the two-hop path: 20 reaches tokyo, 21 osaka.
+    comments: [
+      { id: 20, body: 'nice', post: 10 },
+      { id: 21, body: 'hm', post: 12 }
     ]
   }.freeze
 
@@ -120,7 +129,37 @@ class DBConformanceTest < Minitest::Test
     'having on a group key' => ->(s) { s[:users].group(:city).count(:people).having(:city, :not, 'osaka') },
     'having then order' => lambda { |s|
       s[:users].group(:city).count(:people).having(:people, :gte, 1).order(:people, :desc)
-    }
+    },
+
+    # The pullback: `f*(S)` is a subobject of the *domain*, which is the one
+    # thing `follow` cannot hand back. Every model has to agree about which side
+    # of the span the answer is read from.
+    'a pullback' => ->(s) { s[:posts].where_at(:author, :city, 'tokyo') },
+    'a pullback then an image' => ->(s) { s[:posts].where_at(:author, :city, 'tokyo').select(:title) },
+    'a pullback then a subobject' => lambda { |s|
+      s[:posts].where_at(:author, :city, 'tokyo').where(:title, 'hello')
+    },
+    'a subobject then a pullback' => lambda { |s|
+      s[:posts].where(:title, 'hello').where_at(:author, :city, 'tokyo').select(:title, :id)
+    },
+    'a pullback then a composition' => ->(s) { s[:posts].where_at(:author, :city, 'tokyo').follow(:author) },
+    'two pullbacks along the same morphism' => lambda { |s|
+      s[:posts].where_at(:author, :city, 'tokyo').where_at(:author, :name, 'mina')
+    },
+    'an empty pullback' => ->(s) { s[:posts].where_at(:author, :city, 'kyoto') },
+    'a pullback along a path of length two' => lambda { |s|
+      s[:comments].where_along(%i[post author], :city, 'tokyo')
+    },
+    'a two-hop pullback then an image' => lambda { |s|
+      s[:comments].where_along(%i[post author], :city, 'tokyo').select(:body)
+    },
+    'a fold after a pullback' => lambda { |s|
+      s[:posts].where_at(:author, :city, 'tokyo').group(:title).count(:posts)
+    },
+
+    # A window with no upper bound. Every dialect spells "no limit" differently
+    # and the models have to land on the same rows regardless.
+    'an offset with no limit' => ->(s) { s[:users].order(:name).offset(1) }
   }.freeze
 
   def setup
@@ -151,9 +190,20 @@ class DBConformanceTest < Minitest::Test
       SCHEMA[:posts].where(:title, 'hello').follow(:author).where(:city, 'tokyo').select(:name)
     )
 
-    assert_equal 'SELECT DISTINCT t1.name FROM posts t0 JOIN users t1 ON t0.author = t1.id ' \
-                 'WHERE t0.title = ? AND t1.city = ?', sql
+    assert_equal 'SELECT DISTINCT "t1"."name" FROM "posts" "t0" JOIN "users" "t1" ON "t0"."author" = "t1"."id" ' \
+                 'WHERE "t0"."title" = ? AND "t1"."city" = ?', sql
     assert_equal %w[hello tokyo], binds
+  end
+
+  # The pullback emits the same join and reads the other side of the span: the
+  # carrier's alias is still what the projection and the later steps qualify
+  # against, so the answer is posts rather than users.
+  def test_a_pullback_compiles_to_the_same_join_read_from_the_other_side
+    sql, binds = Sodalite::DB::SQL.compile(SCHEMA[:posts].where_at(:author, :city, 'tokyo').select(:title))
+
+    assert_equal 'SELECT DISTINCT "t0"."title" FROM "posts" "t0" JOIN "users" "t1" ON "t0"."author" = "t1"."id" ' \
+                 'WHERE "t1"."city" = ?', sql
+    assert_equal %w[tokyo], binds
   end
 
   def test_a_whole_row_result_is_typed_by_the_same_schema_that_types_a_response
@@ -187,19 +237,22 @@ class DBConformanceTest < Minitest::Test
   def test_a_fold_compiles_to_group_by_and_an_order_to_a_total_order
     sql, = Sodalite::DB::SQL.compile(SCHEMA[:users].group(:city).count(:people).order(:people, :desc).limit(2))
 
-    assert_equal 'SELECT g.city, COUNT(*) AS people FROM ' \
-                 '(SELECT DISTINCT t0.id, t0.name, t0.city, t0.nickname FROM users t0) g ' \
-                 'GROUP BY g.city ORDER BY people DESC, city ASC LIMIT 2', sql
+    assert_equal 'SELECT "g"."city", COUNT(*) AS "people" FROM ' \
+                 '(SELECT DISTINCT "t0"."id", "t0"."name", "t0"."city", "t0"."nickname" FROM "users" "t0") "g" ' \
+                 'GROUP BY "g"."city" ORDER BY "people" DESC, "city" ASC LIMIT 2', sql
   end
 
   # The coproduct compiles to UNION, which deduplicates — so it is set union,
-  # which is what a Relation means.
+  # which is what a Relation means. Neither branch spells `DISTINCT` here: they
+  # keep their carrier's key and take no composition, so the image is already
+  # taken, and `UNION` would have taken it again anyway.
   def test_a_coproduct_compiles_to_union_and_a_having_to_having
     union, = Sodalite::DB::SQL.compile(SCHEMA[:users].where(:id, 1).union(SCHEMA[:users].where(:id, 2)))
     having, = Sodalite::DB::SQL.compile(SCHEMA[:users].group(:city).count(:people).having(:people, :gt, 1))
 
-    assert_includes union, ' UNION SELECT DISTINCT '
-    assert_includes having, ' HAVING people > ?'
+    assert_includes union, ' UNION SELECT "t0"."id", '
+    refute_includes union, 'DISTINCT'
+    assert_includes having, ' HAVING "people" > ?'
   end
 
   # Rollback is not a feature a model implements for the caller's benefit — it is
