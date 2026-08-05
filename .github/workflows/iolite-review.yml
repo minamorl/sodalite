@@ -64,6 +64,7 @@ jobs:
             examples/
             sodalite.gemspec
             Rakefile
+            .github/workflows/
           exclude_paths: |
             Gemfile.lock
           pr_number: ${{ github.event.inputs.pr_number }}
