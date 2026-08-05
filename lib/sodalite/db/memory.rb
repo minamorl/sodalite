@@ -124,6 +124,10 @@ module Sodalite
                           .map { |row| @schema.dangling_message(table.name, field, row[field], target) }
       end
 
+      # One scan of the target per morphism, not per element of its domain:
+      # `dangling` binds this before it walks the domain, so the image of the
+      # target's key is built once and every row is then tested against the same
+      # set.
       def keys_of(target)
         key = @schema.table(target).key
         @store[target].to_set { |row| row[key] }
@@ -262,7 +266,28 @@ module Sodalite
         Listing[ordered, schema: query.row_schema]
       end
 
+      # The order is on `A + 1`, because that is what a presentation actually has
+      # to order: a nullable column carries the adjoined point outright, and
+      # `min`/`max` fold a fibre that is entirely nothing to it. Left alone,
+      # `nil <=> x` is nil and flipping that for a descending order raises — and
+      # SQL settles nothing on its own, since sqlite sorts the nothings first and
+      # postgres last. So this was three answers rather than a cost.
+      #
+      # `nothing` sorts **after** every element of A, in both directions. Not
+      # last ascending and first descending: it is not an element being ordered,
+      # it is the point adjoined to A, so the order on A never reaches it and
+      # reversing that order cannot move it. The other two say the same sentence
+      # in SQL, as `NULLS LAST` on every ordering. It is also the reading that
+      # keeps a window meaning something — `order(:score, :desc).limit(3)` is the
+      # three largest scores, not a presentation of three absences of one.
+      #
+      # Eliminating the `+ 1` first is what leaves the flip total: two elements
+      # of one declared type always compare.
       def compare(left, right, direction)
+        return 0 if left.nil? && right.nil?
+        return 1 if left.nil?
+        return -1 if right.nil?
+
         verdict = left <=> right
         direction == :desc ? -verdict : verdict
       end
@@ -275,6 +300,45 @@ module Sodalite
         record = table.fields.to_h { |field| [field, row[field]] }
         @store[table.name] << record
         record[table.key]
+      end
+
+      # `updatable!` comes first for the reason `deletable!` does below. A
+      # projection names tuples rather than elements of the carrier, so the
+      # lookup below would find no row carrying such a key and answer that zero
+      # rows changed — an answer shaped exactly like a fact — or, where the image
+      # happened to keep the key, would change rows through an arrow whose value
+      # was never a set of them. It refuses two things more than a deletion does:
+      # a pullback guard, which cannot be evaluated inside the statement that
+      # applies the change, and a change of a field whose type does not carry it.
+      #
+      # The rows are then found again in the store, by key. What an arrow hands
+      # back is a set of *copies* — `phase_one` opens with
+      # `@store.fetch(query.root).map(&:dup)`, and has to, because the value of an
+      # arrow is a `Relation` rather than a handle on the instance — so writing
+      # into what `select` returned would change nothing while answering as
+      # though it had. A subobject names elements of the carrier, the key is what
+      # names an element, and the key is therefore the way back from the named set
+      # to the set itself.
+      #
+      # Taken under the monitor, so that a change inside `atomically` composes
+      # with the snapshot the way `insert` and `delete` do: the scope copied the
+      # store on the way in, and this writes into the one it will or will not put
+      # back.
+      #
+      # The count is the size of the subobject in the store, not the number of
+      # rows whose value came out different. `add(0)` is the identity on a value
+      # and still a change applied to a row, and rows-applied-to is the count the
+      # two compiling models can report.
+      def update(query, changes, confirm_carrier: nil)
+        query.updatable!(changes, confirm_carrier: confirm_carrier)
+        ordered = Change.ordered(changes)
+        table = @schema.table(query.carrier)
+        @lock.synchronize do
+          named = select(query).to_set { |row| row[table.key] }
+          held = @store[table.name].select { |row| named.include?(row[table.key]) }
+          held.each { |row| apply_changes(row, ordered) }
+          held.size
+        end
       end
 
       # `deletable!` comes first because everything it refuses would otherwise be
@@ -352,6 +416,32 @@ module Sodalite
 
       def stringify(row)
         row.to_h { |field, value| [field.to_s, value] }
+      end
+
+      # In the order `Change.ordered` fixed, and into the row itself. Each change
+      # reads only the field it writes, so applying them one after another is the
+      # same function as applying them at once, which is what a `SET` list is.
+      def apply_changes(row, ordered)
+        ordered.each { |field, change| row[field] = changed(row[field], change) }
+      end
+
+      # `:add` on a `nothing` is `nothing`.
+      #
+      # A nullable column is a map into `A + 1` and `+ delta` is a function on
+      # `A`. Exactly one extension of it to `A + 1` leaves the coproduct alone —
+      # `+ delta` on A, the identity on the adjoined point — and the adjoined
+      # point is fixed because there is no element there for a delta to be added
+      # to. It is the elimination `compare?` already makes for a subobject and
+      # `Aggregate#fold` for a monoid, and it is what the other two models compute
+      # unaided, since `NULL + 1` is `NULL`. Reading the nothing as zero would be
+      # the special case, and it would have to be written into all three: it
+      # invents an element of A where the instance recorded none, and it makes
+      # `add(0)` a write.
+      def changed(value, change)
+        return change.operand if change.kind == :set
+        return nil if value.nil?
+
+        value + change.operand
       end
     end # rubocop:enable Metrics/ClassLength
   end
