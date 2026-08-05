@@ -28,28 +28,35 @@ class DBHistoryTest < Minitest::Test
     assert_equal %i[id title author], HISTORY.schema.table(:posts).fields
   end
 
-  def test_a_version_is_how_far_along_the_composite_a_database_got
-    assert_equal %i[id name], HISTORY.schema_at(1).table(:users).fields
-    assert_equal %i[id name city], HISTORY.schema_at(2).table(:users).fields
+  # A version counts steps along the *solved* order, the same number line
+  # `rollback!(to:)` uses. These three form a chain, so the count is unambiguous;
+  # the fourth step shares a layer with the second and no position is promised.
+  def test_a_version_is_how_far_along_the_solved_order_a_database_got
+    chain = Sodalite::DB.history(*HISTORY.steps.first(3))
+
+    assert_equal HISTORY.steps.first(3), chain.plan.order
+    assert_equal %i[id name], chain.schema_after(1).table(:users).fields
+    assert_equal %i[id name city], chain.schema_after(2).table(:users).fields
+    assert_equal %i[id name town], chain.schema_after(3).table(:users).fields
   end
 
   # Losing information is exactly what a non-injective map does, so the question
   # is answerable before a single statement runs.
   def test_reversibility_is_computed_from_the_steps_not_promised
-    assert HISTORY.reversible_to?(0)
+    assert HISTORY.reversible_after?(0)
     assert_empty HISTORY.irreversible_steps
 
     forgetful = Sodalite::DB.history(*HISTORY.steps, %i[drop_attribute users name])
 
-    refute forgetful.reversible_to?(0)
+    refute forgetful.reversible_after?(0)
     assert_equal ['drop_attribute(:users, :name)'], forgetful.irreversible_steps.map(&:to_s)
-    assert forgetful.reversible_to?(5)
+    assert forgetful.reversible_after?(5)
   end
 
   def test_a_forgetful_step_has_no_inverse_and_says_so
     drop = Sodalite::DB::Step[:drop_table, :users]
 
-    error = assert_raises(Sodalite::DB::MigrationError) { drop.inverse(HISTORY.spec_at(1)) }
+    error = assert_raises(Sodalite::DB::MigrationError) { drop.inverse(HISTORY.spec_after(1)) }
 
     assert_match(/forgets information and has no inverse/, error.message)
   end
@@ -57,7 +64,7 @@ class DBHistoryTest < Minitest::Test
   # A rename is an isomorphism, so applying it and then its inverse is the
   # identity on the presentation.
   def test_a_rename_composed_with_its_inverse_is_the_identity
-    before = HISTORY.spec_at(2)
+    before = Sodalite::DB.history(*HISTORY.steps.first(2)).spec_after(2)
     rename = Sodalite::DB::Step[:rename_attribute, :users, :city, :town]
     after = rename.apply(before)
 
@@ -97,7 +104,7 @@ class DBHistoryTest < Minitest::Test
   end
 
   def test_the_coproduct_and_its_decomposition_are_inverse
-    before = ANIMALS.spec_at(2)
+    before = ANIMALS.spec_after(2)
     merge = ANIMALS.steps.last
 
     assert_predicate merge, :reversible?
@@ -118,9 +125,9 @@ class DBMigrationConformanceTest < Minitest::Test
     skip 'sqlite3 unavailable' unless MIGRATION_SQLITE
 
     first_step = Sodalite::DB.history(*HISTORY.steps.first(1))
-    @memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(HISTORY.spec_at(1)))
-    @sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(HISTORY.spec_at(0)), Adapter.new).migrate!(first_step)
-    @sequel = Sodalite::DB.sequel(Sodalite::DB::Schema.new(HISTORY.spec_at(0)), Sequel.sqlite)
+    @memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(HISTORY.spec_after(1)))
+    @sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(HISTORY.spec_after(0)), Adapter.new).migrate!(first_step)
+    @sequel = Sodalite::DB.sequel(Sodalite::DB::Schema.new(HISTORY.spec_after(0)), Sequel.sqlite)
                           .migrate!(first_step)
     models.each { |model| model.insert(:users, { id: 1, name: 'mina' }) }
   end
@@ -199,9 +206,9 @@ class DBMigrationConformanceTest < Minitest::Test
   def test_every_model_carries_the_coproduct_identically
     history = DBHistoryTest::ANIMALS
     first_two = Sodalite::DB.history(*history.steps.first(2))
-    memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(history.spec_at(2)))
-    sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(history.spec_at(0)), Adapter.new).migrate!(first_two)
-    sequel = Sodalite::DB.sequel(Sodalite::DB::Schema.new(history.spec_at(0)), Sequel.sqlite)
+    memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(history.spec_after(2)))
+    sql = Sodalite::DB.sql(Sodalite::DB::Schema.new(history.spec_after(0)), Adapter.new).migrate!(first_two)
+    sequel = Sodalite::DB.sequel(Sodalite::DB::Schema.new(history.spec_after(0)), Sequel.sqlite)
                          .migrate!(first_two)
     [memory, sql, sequel].each do |model|
       model.insert(:cats, { id: 1, name: 'mi' })
@@ -220,7 +227,7 @@ class DBMigrationConformanceTest < Minitest::Test
       *DBHistoryTest::ANIMALS.steps,
       [:split_table, :animals, :species, { 'cats' => :cats, 'dogs' => :dogs }]
     )
-    memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(history.spec_at(2)))
+    memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(history.spec_after(2)))
     memory.insert(:cats, { id: 1, name: 'mi' })
     memory.insert(:dogs, { id: 2, name: 'pochi' })
     memory.migrate!(history)
