@@ -46,7 +46,7 @@ module Sodalite
       end
 
       # An object and the indexes its morphisms ask for are created together,
-      # because `Sql#create_tables!` creates them together: a presentation
+      # because `Sql#create_tables_for_test!` creates them together: a presentation
       # reached by migrating and the same presentation reached by declaring it
       # have to be the same database, and two roads that disagree about the
       # indexes are the ledger and the migration disagreeing about what the
