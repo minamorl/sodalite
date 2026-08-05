@@ -42,9 +42,10 @@ class DBCarriesTest < Minitest::Test
   def test_the_uncovered_fibres_violation_names_the_tag_its_image_and_what_that_breaks
     memory = animals([1, 'tweety', 'birds'], [2, 'nemo', 'fish'], [3, 'iago', 'birds'])
 
-    assert_equal ['the image of animals.species is not contained in the decomposition, which names ' \
-                  'no fibre for ["birds", "fish"]: the fibres do not cover animals, so the coproduct ' \
-                  'cannot be taken apart along that tag'],
+    assert_equal ['animals.species = "birds" is outside the decomposition ("cats", "dogs"), so the ' \
+                  'fibres do not cover animals and the coproduct cannot be taken apart along that tag',
+                  'animals.species = "fish" is outside the decomposition ("cats", "dogs"), so the ' \
+                  'fibres do not cover animals and the coproduct cannot be taken apart along that tag'],
                  memory.preflight_violations(SPLIT)
   end
 
@@ -55,8 +56,10 @@ class DBCarriesTest < Minitest::Test
     memory = animals(*rows)
     step = Sodalite::DB::Step[:split_table, :animals, :species, { 't00' => :t00 }]
 
-    assert_includes memory.preflight_violations(step).first,
-                    'no fibre for ["t01", "t02", "t03", "t04", "t05", ...6 more]:'
+    violations = memory.preflight_violations(step)
+
+    assert_equal 6, violations.size
+    assert_equal 'and 6 more tag values like it', violations.last
   end
 
   def test_the_coproduct_of_disjoint_injections_tags_each_element_with_the_one_it_came_through
@@ -73,9 +76,9 @@ class DBCarriesTest < Minitest::Test
   def test_a_key_reached_through_two_injections_is_refused_because_the_sum_is_not_disjoint
     memory = pets(cats: [[1, 'mi']], dogs: [[1, 'pochi']])
 
-    assert_equal ['the coproduct of [:cats, :dogs] is not disjoint on id, which repeats at [1]: Σ_F ' \
-                  'tags which injection an element came through but does not make the keys disjoint, ' \
-                  'so two elements sharing a key are not two elements of the sum'],
+    assert_equal ['id 1 is in more than one of cats, dogs — Σ_F tags which injection an element came ' \
+                  'through but does not make the keys disjoint, so two elements under one key are ' \
+                  'not two elements of the sum'],
                  memory.preflight_violations(MERGE)
   end
 
@@ -84,7 +87,7 @@ class DBCarriesTest < Minitest::Test
   def test_a_key_repeated_inside_one_injection_is_the_same_failure
     memory = pets(cats: [[1, 'mi'], [1, 'mii']], dogs: [])
 
-    assert_includes memory.preflight_violations(MERGE).first, 'is not disjoint on id, which repeats at [1]:'
+    assert_includes memory.preflight_violations(MERGE).first, 'id 1 is in more than one of cats'
   end
 
   # Every other step is a map that exists for every instance, so there is nothing

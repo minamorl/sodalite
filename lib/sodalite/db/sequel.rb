@@ -189,18 +189,6 @@ module Sodalite
         result
       end
 
-      # Two readings, taken before anything is carried. The sentences are
-      # `Preflight`'s, so this model and the other two refuse a step in one
-      # wording rather than three.
-      def preflight_violations(step)
-        table, *rest = step.args
-        case step.kind
-        when :split_table then unlisted_tags(table, rest[0], rest[1], distinct_values(table, rest[0]))
-        when :merge_tables then colliding_keys(key_of(rest[0]), key_holders(table, rest[0]))
-        else []
-        end
-      end
-
       # The insert is the claim, and `id` is a primary key, so two runners
       # racing here are settled by the database. Sequel maps the driver's
       # uniqueness error onto a class of its own, so the lost race is caught by
@@ -237,18 +225,10 @@ module Sodalite
         @db[table].distinct.select_map(field)
       end
 
-      def key_holders(sources, into)
-        key = key_of(into)
+      def key_holders(sources, key)
         sources.each_with_object(Hash.new { |all, value| all[value] = [] }) do |source, holders|
           @db[source].select_map(key).each { |value| holders[value] << source }
         end
-      end
-
-      # The sources of a coproduct share a shape, so they share the key the
-      # target has — and the target is the one of them the schema still knows
-      # about once the step has been applied to the presentation.
-      def key_of(into)
-        @schema.table(into).key
       end
 
       def ensure_ledger!

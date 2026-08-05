@@ -433,18 +433,6 @@ module Sodalite
         @depth -= 1
       end
 
-      # Two readings, taken before anything is carried. The sentences are
-      # `Preflight`'s, so this model and the other two refuse a step in one
-      # wording rather than three.
-      def preflight_violations(step)
-        table, *rest = step.args
-        case step.kind
-        when :split_table then unlisted_tags(table, rest[0], rest[1], distinct_values(table, rest[0]))
-        when :merge_tables then colliding_keys(key_of(rest[0]), key_holders(table, rest[0]))
-        else []
-        end
-      end
-
       # The row is `id = 1` and the table's primary key is what makes it one, so
       # two runners racing here are settled by the database rather than by a
       # `WHERE NOT EXISTS` both of them can pass. The loser's insert fails.
@@ -495,19 +483,12 @@ module Sodalite
         @connection.execute("SELECT DISTINCT #{SQL.quote(field)} FROM #{SQL.quote(table)}", []).map(&:first)
       end
 
-      def key_holders(sources, into)
-        key = SQL.quote(key_of(into))
+      def key_holders(sources, key)
+        key = SQL.quote(key)
         sources.each_with_object(Hash.new { |all, value| all[value] = [] }) do |source, holders|
           @connection.execute("SELECT #{key} FROM #{SQL.quote(source)}", [])
                      .each { |row| holders[row.first] << source }
         end
-      end
-
-      # The sources of a coproduct share a shape, so they share the key the
-      # target has — and the target is the one of them the schema still knows
-      # about once the step has been applied to the presentation.
-      def key_of(into)
-        @schema.table(into).key
       end
 
       # The keys are named twice — once to remove them, once to count what is

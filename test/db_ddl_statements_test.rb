@@ -15,7 +15,7 @@ end
 # `db_ddl_test.rb` asks whether every step kind produces statements at all. This
 # asks what they say.
 #
-# There are two roads to one presentation — declare it and call `create_tables!`,
+# There are two roads to one presentation — declare it and call `create_tables_for_test!`,
 # or migrate to it — and a schema is only a schema if both arrive at the same
 # database. So the statements are pinned as text: the identifiers a migration
 # writes are quoted the way the compiler quotes them, the indexes a morphism asks
@@ -69,7 +69,7 @@ class DBDDLStatementsTest < Minitest::Test
   end
 
   # --- the indexes a morphism asks for ------------------------------------
-  # `Sql#create_tables!` creates them with the table. A table a migration made
+  # `Sql#create_tables_for_test!` creates them with the table. A table a migration made
   # used to get none, so the same presentation had different indexes depending
   # on which road reached it.
 
@@ -303,13 +303,13 @@ class DBDDLStatementsRunTest < Minitest::Test
     assert_match(/UPDATE `order` SET `where` = 'unknown' WHERE \(`where` IS NULL\)/, log.string)
   end
 
-  # The migration road and the `create_tables!` road name the same indexes,
+  # The migration road and the `create_tables_for_test!` road name the same indexes,
   # which is the whole of audit 3.1: a table a migration made used to get none.
   def test_a_migration_creates_the_indexes_declaring_the_schema_would_have
     carried = carry(RESERVED, after: 0)
     carried.migrate!(RESERVED)
     declared = Adapter.new
-    Sodalite::DB.sql(RESERVED.schema, declared).create_tables!
+    Sodalite::DB.sql(RESERVED.schema, declared).create_tables_for_test!
 
     assert_equal [%w[index_select_on_order], %w[index_select_on_order]], carried.indexes(:select)
     assert_equal %w[index_select_on_order], declared.indexes(:select)
@@ -343,7 +343,7 @@ class DBDDLStatementsRunTest < Minitest::Test
     after = Sodalite::DB::Schema.new(step.apply(FLOCK))
     adapter = Adapter.new
     memory = Sodalite::DB.memory(Sodalite::DB::Schema.new(FLOCK))
-    [Sodalite::DB.sql(Sodalite::DB::Schema.new(FLOCK), adapter).create_tables!, memory].each { |m| seed(m) }
+    [Sodalite::DB.sql(Sodalite::DB::Schema.new(FLOCK), adapter).create_tables_for_test!, memory].each { |m| seed(m) }
     Sodalite::DB::DDL.ddl(step, after).each { |sql, binds| adapter.execute(sql, binds) }
     memory.carry(step)
     query = after[:cats].follow(:owner).select(:name)

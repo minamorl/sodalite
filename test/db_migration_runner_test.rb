@@ -221,8 +221,9 @@ class DBMigrationPreflightTest < Minitest::Test
       error.message
     end
 
-    assert_equal ["#{SPLIT.plan.order.last} cannot be carried: animals.species = \"dogs\" is not one " \
-                  "of the decomposition's tags (\"cats\"), so those rows have nowhere to go"],
+    assert_equal ["#{SPLIT.plan.order.last} cannot be carried: animals.species = \"dogs\" is outside " \
+                  'the decomposition ("cats"), so the fibres do not cover animals and the coproduct ' \
+                  'cannot be taken apart along that tag'],
                  messages.uniq
   end
 
@@ -237,8 +238,9 @@ class DBMigrationPreflightTest < Minitest::Test
       error.message
     end
 
-    assert_equal ["#{MERGE.plan.order.last} cannot be carried: id 1 is in more than one of cats, dogs, " \
-                  'so the coproduct would have two rows under one key'],
+    assert_equal ["#{MERGE.plan.order.last} cannot be carried: id 1 is in more than one of cats, dogs " \
+                  '— Σ_F tags which injection an element came through but does not make the keys ' \
+                  'disjoint, so two elements under one key are not two elements of the sum'],
                  messages.uniq
   end
 

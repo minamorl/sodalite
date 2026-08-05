@@ -93,19 +93,6 @@ module Sodalite
         end
       end
 
-      # Two readings, taken before anything is carried. The sentences are
-      # `Preflight`'s, so this model and the other two refuse a step in one
-      # wording rather than three — and this is the model that would otherwise
-      # answer with a `KeyError` naming the tag it could not place.
-      def preflight_violations(step)
-        table, *rest = step.args
-        case step.kind
-        when :split_table then unlisted_tags(table, rest[0], rest[1], tag_values(table, rest[0]))
-        when :merge_tables then colliding_keys(key_of(rest[0]), key_holders(table, rest[0]))
-        else []
-        end
-      end
-
       # --- the functor laws, checkable ---------------------------------------
       # A dangling foreign key is not a bad row. It is a failure to be a functor:
       # the morphism `posts -> users` has no value at that element.
@@ -286,22 +273,14 @@ module Sodalite
 
       private
 
-      def tag_values(table, tag)
-        @store.fetch(table).map { |row| row[tag] }
+      def distinct_values(table, field)
+        @store.fetch(table).map { |row| row[field] }.uniq
       end
 
-      def key_holders(sources, into)
-        key = key_of(into)
+      def key_holders(sources, key)
         sources.each_with_object(Hash.new { |all, value| all[value] = [] }) do |source, holders|
           @store.fetch(source).each { |row| holders[row[key]] << source }
         end
-      end
-
-      # The sources of a coproduct share a shape, so they share the key the
-      # target has — and the target is the one of them the schema still knows
-      # about once the step has been applied to the presentation.
-      def key_of(into)
-        @schema.table(into).key
       end
 
       def stringify(row)

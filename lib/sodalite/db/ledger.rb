@@ -93,6 +93,33 @@ module Sodalite
     # the *reading* — a `SELECT DISTINCT`, a dataset, a walk over a Hash — and
     # nothing else.
     module Preflight
+      # How many offending values a refusal spells out. The list names which
+      # fibres, or which keys, the coproduct came apart on, and a decomposition
+      # written by hand has a handful of either; past this many the reader is
+      # looking at a systematic mismatch rather than at one value, and the count
+      # says that better than a longer list does.
+      VIOLATION_SAMPLE = 5
+
+      # Whether the instances admit the step at all, asked before anything is
+      # carried. The two answerable cases are one failure seen from either side:
+      # `split_table` needs the tag's image inside the decomposition,
+      # `merge_tables` needs the injections to land on disjoint keys. Neither is
+      # repaired by making one model behave like the other — a model that
+      # deletes the elements it cannot place and a model that raises halfway
+      # through are two wrong answers to one input — so the step is refused,
+      # identically, before either runs.
+      #
+      # A model supplies `distinct_values(table, field)` and
+      # `key_holders(sources, key)`. Everything else about the answer is here.
+      def preflight_violations(step)
+        table, *rest = step.args
+        case step.kind
+        when :split_table then unlisted_tags(table, rest[0], rest[1])
+        when :merge_tables then coproduct_collisions(table, rest[0])
+        else []
+        end
+      end
+
       private
 
       def refuse_violations!(step)
@@ -107,29 +134,56 @@ module Sodalite
       # `INSERT ... SELECT ... WHERE tag = ?` never picks it up and the closing
       # `DROP TABLE` then takes it. The in-memory model raises `KeyError` at the
       # same row, which is the same fact said less usefully.
-      def unlisted_tags(table, tag, into, values)
-        values.uniq.reject { |value| into.key?(value) }.sort_by(&:to_s)
-              .map { |value| unlisted_tag_violation(table, tag, value, into) }
+      def unlisted_tags(table, tag, into)
+        uncovered = distinct_values(table, tag).uniq.reject { |value| into.key?(value) }
+        sample(uncovered.sort_by(&:to_s), 'tag') { |value| unlisted_tag_violation(table, tag, value, into) }
       end
 
-      # A `merge_tables` is the coproduct, so two sources holding one key make a
-      # target with two rows under one key — and under a primary key, one row
-      # and a lost one. `holders` is `{ key value => the sources holding it }`;
-      # which of those is a collision is one decision, not three.
+      # A `merge_tables` is the coproduct, so a key carried twice makes a target
+      # with two rows under one key — and under a primary key, one row and a lost
+      # one. `holders` is `{ key value => an entry per row holding it }`, so a key
+      # repeated inside a single source counts: the tag distinguishes the
+      # injections, never the elements inside one.
+      def coproduct_collisions(sources, into)
+        key = coproduct_key(into, sources)
+        colliding_keys(key, key_holders(sources, key))
+      end
+
       def colliding_keys(key, holders)
-        holders.select { |_value, sources| sources.uniq.size > 1 }
-               .keys.sort_by(&:to_s)
-               .map { |value| colliding_key_violation(key, value, holders[value].uniq) }
+        collided = holders.select { |_value, sources| sources.size > 1 }.keys.sort_by(&:to_s)
+        sample(collided, 'key') { |value| colliding_key_violation(key, value, holders[value].uniq) }
+      end
+
+      # The sources of a coproduct share a shape, so they share the key the target
+      # has, and either side answers. Only one side is in the schema at a time,
+      # though: `migrate!` asks this with the presentation already moved to the
+      # step's shape, while a caller holding the model outside that window has
+      # the sources and not the target. Reading whichever is present keeps the
+      # question askable in both, instead of only in the window the runner uses.
+      def coproduct_key(into, sources)
+        named = [into, *sources].find { |name| @schema.names.include?(name) }
+        raise MigrationError, "neither #{into} nor #{sources.join(', ')} is a table here" unless named
+
+        @schema.table(named).key
+      end
+
+      def sample(values, noun, &)
+        shown = values.first(VIOLATION_SAMPLE).map(&)
+        return shown if values.size <= VIOLATION_SAMPLE
+
+        shown << "and #{values.size - VIOLATION_SAMPLE} more #{noun} values like it"
       end
 
       def unlisted_tag_violation(table, tag, value, into)
-        "#{table}.#{tag} = #{value.inspect} is not one of the decomposition's tags " \
-          "(#{into.keys.map(&:inspect).join(', ')}), so those rows have nowhere to go"
+        "#{table}.#{tag} = #{value.inspect} is outside the decomposition " \
+          "(#{into.keys.map(&:inspect).join(', ')}), so the fibres do not cover #{table} and the " \
+          'coproduct cannot be taken apart along that tag'
       end
 
       def colliding_key_violation(key, value, sources)
-        "#{key} #{value.inspect} is in more than one of #{sources.join(', ')}, " \
-          'so the coproduct would have two rows under one key'
+        "#{key} #{value.inspect} is in more than one of #{sources.join(', ')} — Σ_F tags which " \
+          'injection an element came through but does not make the keys disjoint, so two elements ' \
+          'under one key are not two elements of the sum'
       end
     end
 
