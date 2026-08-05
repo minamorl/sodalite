@@ -24,3 +24,9 @@ gem 'sqlite3', '~> 2.0', require: false
 # pooling — not a second query language, and it stays out of the gemspec for the
 # same reason no driver is in it: `DB.sequel` takes a database someone else built.
 gem 'sequel', '~> 5.0', require: false
+
+# The three tests that read what a backend was actually handed attach a logger
+# to a StringIO. `logger` stopped being a default gem in Ruby 4.0, and the CI
+# matrix runs 4.0, so the dependency has to be said out loud rather than assumed
+# to be there because it always used to be.
+gem 'logger', require: false

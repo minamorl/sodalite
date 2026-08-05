@@ -182,3 +182,62 @@ class DBNestedScopeTest < Minitest::Test
     end
   end
 end
+
+# The App is frozen once and shared across every Puma thread, so one model
+# answers all of them. A scope depth kept on the model would let one request's
+# open transaction be read as another request's nesting — and the second would
+# skip its own `BEGIN` and be committed, or rolled back, by whichever request
+# finished first. The depth belongs to the thread that opened the scope.
+class DBScopeDepthIsPerThreadTest < Minitest::Test
+  SCHEMA = Sodalite::DB.schema(notes: { id: :integer, body: :string })
+
+  # Records what it was handed and is safe to share, so the claim under test is
+  # which statements each thread caused rather than what a driver did with them.
+  class Recorder
+    attr_reader :statements
+
+    def initialize
+      @statements = []
+      @lock = Mutex.new
+    end
+
+    def execute(sql, _binds)
+      @lock.synchronize { @statements << sql }
+      []
+    end
+  end
+
+  def test_two_threads_each_open_their_own_scope
+    recorder = Recorder.new
+    model = Sodalite::DB.sql(SCHEMA, recorder)
+    entered = Queue.new
+    release = Queue.new
+
+    holder = Thread.new do
+      model.atomically do
+        entered.push(:in)
+        release.pop
+        Sodalite::DB::Relation[[]]
+      end
+    end
+
+    entered.pop
+    model.atomically { Sodalite::DB::Relation[[]] }
+    release.push(:go)
+    holder.join
+
+    assert_equal 2, recorder.statements.count('BEGIN')
+    assert_equal 2, recorder.statements.count('COMMIT')
+  end
+
+  # The nesting rule is unchanged for the thread that is actually nesting.
+  def test_one_thread_nesting_still_joins_its_own_scope
+    recorder = Recorder.new
+    model = Sodalite::DB.sql(SCHEMA, recorder)
+
+    model.atomically { model.atomically { Sodalite::DB::Relation[[]] } }
+
+    assert_equal 1, recorder.statements.count('BEGIN')
+    assert_equal 1, recorder.statements.count('COMMIT')
+  end
+end

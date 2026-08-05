@@ -782,8 +782,8 @@ module Sodalite
       # that ever moves it, and the `ensure` is what keeps a raise from leaving
       # it behind.
       def atomically
-        @depth = (@depth || 0) + 1
-        outermost = @depth == 1
+        outermost = scope_depth.zero?
+        self.scope_depth += 1
         @connection.execute('BEGIN', []) if outermost
         result = yield
         @connection.execute(result.is_a?(Berylx::Err) ? 'ROLLBACK' : 'COMMIT', []) if outermost
@@ -792,7 +792,32 @@ module Sodalite
         @connection.execute('ROLLBACK', []) if outermost
         raise
       ensure
-        @depth -= 1
+        self.scope_depth -= 1
+      end
+
+      private
+
+      # How deep this thread is, not how deep the model is. The App is frozen
+      # once and shared across every Puma thread, so one model answers all of
+      # them — and a counter in an ivar would let one request's open scope be
+      # read as another request's nesting, so the second would skip its own
+      # `BEGIN` and be committed or rolled back by whichever finished first.
+      # The depth belongs to the thread that opened the scope.
+      #
+      # The connection is still the caller's, and one connection cannot carry
+      # two concurrent transactions whoever counts them. That is the same
+      # boundary as everywhere else here: the model's own state is safe to
+      # share, and the handle it was given is the caller's to make safe.
+      def scope_depth
+        Thread.current[scope_key] ||= 0
+      end
+
+      def scope_depth=(depth)
+        Thread.current[scope_key] = depth
+      end
+
+      def scope_key
+        @scope_key ||= :"sodalite_db_sql_scope_#{object_id}"
       end
     end # rubocop:enable Metrics/ClassLength
   end
