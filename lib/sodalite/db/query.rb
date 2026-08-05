@@ -31,19 +31,9 @@ module Sodalite
     # Each phase is optional, their order is fixed, and both models still have to
     # agree on all three — the conformance suite covers the whole pipeline, not
     # just the fragment.
-    # Equality is the regular fragment. An order comparison is still an honest
-    # subobject *when the attribute type carries an order*, which is why the
-    # check is on the type rather than on taste. Negation is the one that
-    # genuinely breaks: `NOT (x = 3)` over a nullable column is three-valued, so
-    # it is refused there and allowed where the type is a plain set.
-    COMPARISONS = { eq: '=', not: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' }.freeze
-    ORDERED_TYPES = %i[integer float number time string].freeze
-    NO_OPERAND = ::Object.new.freeze
-
     Query = Data.define(:schema, :root, :carrier, :steps, :unions, :grouping, :aggregates,
                         :havings, :orderings, :limit_rows, :offset_rows) do
-      include QueryChecks
-      include QueryPhases
+      include QueryChecks, QueryImage, QueryPhases, QueryReads
 
       def self.start(schema, root)
         new(schema: schema, root: root, carrier: root, steps: [].freeze, unions: [].freeze,
@@ -69,6 +59,7 @@ module Sodalite
       def follow(fk)
         check_fragment_open!(:follow)
         check_not_united!(:follow)
+        check_composable!(:follow)
         target = schema.target_of(carrier, fk)
         with(carrier: target, steps: normalised(steps + [[:follow, fk.to_sym, target]]))
       end
@@ -87,6 +78,7 @@ module Sodalite
         check_not_united!(:where)
         operator, operand = comparison(operator_or_value, value)
         check_field!(field)
+        check_in_image!(field, :where)
         check_comparison!(field, operator, operand)
         with(steps: (steps + [[:where, field.to_sym, operand, operator]]).freeze)
       end
@@ -116,6 +108,7 @@ module Sodalite
         check_fragment_open!(:where_along)
         check_not_united!(:where_along)
         paths = Array(paths).map(&:to_sym)
+        check_in_image!(paths.first, :where_along)
         target = path_target(paths)
         operator, operand = comparison(operator_or_value, value)
         check_field!(field, target)

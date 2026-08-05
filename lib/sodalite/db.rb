@@ -3,6 +3,8 @@
 # `sodalite/db` is an optional layer on the core, and says so by requiring it.
 require_relative '../sodalite'
 
+require_relative 'db/address'
+require_relative 'db/writes'
 require_relative 'db/aggregate'
 require_relative 'db/schema'
 require_relative 'db/migration'
@@ -11,7 +13,9 @@ require_relative 'db/carries'
 require_relative 'db/ledger'
 require_relative 'db/change'
 require_relative 'db/query_checks'
+require_relative 'db/query_image'
 require_relative 'db/query_phases'
+require_relative 'db/query_reads'
 require_relative 'db/query'
 require_relative 'db/relation'
 require_relative 'db/evaluates'

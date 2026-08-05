@@ -276,7 +276,7 @@ joins along a function and cannot repeat a row of the carrier.
 Three models, not a stub and the real thing: `DB.memory` (an instance functor into Set), `DB.sql`
 (arrows compiled to SQL text, no driver anywhere near it), and `DB.sequel` (the same arrows lowered
 onto Sequel's expression API, which knows dialects and quoting). `test/db_conformance_test.rb` drives
-fifty arrow shapes through all three and asserts they agree. That is the upgrade: the fixed world no
+sixty-five arrow shapes through all three and asserts they agree. That is the upgrade: the fixed world no
 longer returns what a test author decided, it computes the same query somewhere cheaper — and a bug
 would have to occur in three independent lowerings, identically, to survive.
 
@@ -320,6 +320,58 @@ and every existing adapter works untouched; a connection may *also* answer
 `change(sql, binds) -> Integer`, detected with `respond_to?`, and then a change or a deletion is one
 statement instead of reading the doomed rows into Ruby to count them. Declaring it is a capability, not
 a requirement, and the gem still depends on no driver.
+
+**Staleness is a calculus, not a channel.** The natural request is a push channel — subscribe to a
+query, be told when a write invalidates it. This framework cannot have one, and it is the design that
+says so rather than the schedule: a registry of live subscriptions has to outlive the request that
+registered it and be written by a *different* request, which is exactly what "no global state" and
+"no durability" above are the absence of. The NDJSON/SSE streaming below is not that bus either — it
+is a *response framing*, one request writing many records down its own connection. So what ships is
+the pair of sets a channel would have been built out of, and the broker is yours:
+
+```ruby
+query.reads              # Set<Address> — the places this arrow's answer depends on
+DB.writes(tag, payload)  # Set<Address> — the places performing that operation dirties
+```
+
+> `writes(op)` disjoint from `reads(q)` ⟹ performing `op` cannot have changed `q`'s answer.
+
+An instance is a functor `I : C → Set`, and a functor has two kinds of value — so an address does
+too. `Address.elements(:posts)` is the set `I(posts)`; `Address.field(:posts, :title)` is the function
+`I(title)`. `INSERT` and `DELETE` change which elements exist and nothing else; `UPDATE` changes where
+a map sends them and **cannot** make an element appear or disappear. That is the whole of why this is
+worth computing: an update to `posts.title` leaves a query reading only `posts.id` alone.
+
+```ruby
+INDEX   = SCHEMA[:posts].follow(:author).select(:name)
+depends = INDEX.reads                                                       # => [posts, posts.author, users, users.name]
+
+DB.writes(DB::UPDATE, [SCHEMA[:posts].where(:id, 1), { title: 'renamed' }]) # => [posts.title]  — disjoint, keep the cache
+DB.writes(DB::UPDATE, [SCHEMA[:users].where(:id, 1), { name: 'minamorl' }]) # => [users.name]   — meets, drop it
+DB.writes(DB::INSERT, [:posts, { id: 2, title: 't', author: 1 }])           # => [posts]        — meets, drop it
+```
+
+Both are pure functions of values already in hand — the arrow, and the `(tag, payload)` the caller was
+about to hand `io.perform` — so nothing reads the database, nothing is stored, and the question is
+askable before the write rather than after. Having the operations *return* what they dirtied would
+have widened the fixed signature instead; this way the framework gains a function and no state.
+
+The rule most easily missed is the one that keeps it sound: a query with **no projection** answers
+with whole rows, so it reads *every* field of its final carrier, including the ones nobody named.
+Without it, an update to an unmentioned column looks harmless while changing the answer.
+
+Two things are then refused on purpose. Precision stops at the column rather than the fibre
+(`posts.author`, not `posts.author=2`) because naming the fibres an update dirtied means knowing
+which fibres its rows were in *before* the write, and that is a read — read-then-write being the
+shape `UPDATE` exists to remove. So false positives are accepted, one-sidedly: a false positive only
+wastes work, a false negative serves a stale answer, and the error is taken where it is merely
+wasteful. And `ATOMICALLY` refuses to answer rather than answering `[]` — its payload is a berylx
+task tree, what a task tree performs is not decidable from the value, and `[]` would claim a scope
+dirties nothing, which is the one answer certainly wrong; union the writes of the operations inside
+it. The claim is then scoped the way everything else here is: query normalisation may rewrite a path
+along a declared equation, so `reads` describes the path the query was normalised *to*, which means
+what you wrote on instances satisfying their equations — reported by `equation_violations`, not
+enforced.
 
 A transaction is a combinator whose handler runs the subtree, and rollback is what `Err` means to it:
 
@@ -405,6 +457,11 @@ lay[:response].set(
   end
 )
 ```
+
+This is a **response framing, not a broadcast bus**: one request writing many records down its own
+connection, its state inside its own `Root`, its lifetime ending with the request. Nothing here gives
+a second request a handle on the first one's socket, which is why invalidation above is a pair of sets
+rather than a feed.
 
 ## Install
 
