@@ -45,7 +45,7 @@ module Sodalite
     def initialize(routes:, handlers: nil, errors: {}, max_body_bytes: DEFAULT_MAX_BODY_BYTES)
       @routes = Array(routes).freeze
       @router = Router.new(@routes)
-      @handlers = handlers || Effects.real
+      @handlers = Effects.freeze_map(handlers || Effects.real)
       @max_body_bytes = max_body_bytes
       @performer = Berylx::Perform.new(@handlers)
       @render = Renderer.new(performer: @performer, errors: normalize_errors(errors))
@@ -72,7 +72,7 @@ module Sodalite
 
     def dispatch(route, params, env, head:)
       sieved = sieve(route, params, env)
-      return refuse(sieved) if sieved.is_a?(Refusal)
+      return refuse(sieved, route: route) if sieved.is_a?(Refusal)
 
       result = Berylx::Root[request: sieved, response: nil].call(route.run, handlers: @handlers)
       case result
@@ -131,9 +131,9 @@ module Sodalite
 
     # ------------------------------------------------------------------
 
-    def refuse(refusal, headers = {})
+    def refuse(refusal, headers = {}, route: nil)
       @render.failure(refusal.status, refusal.code, refusal.message,
-                      violations: refusal.violations, headers: headers)
+                      violations: refusal.violations, headers: headers, route: route)
     end
 
     def not_allowed(allow)

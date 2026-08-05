@@ -17,7 +17,7 @@ class StreamTest < Minitest::Test
         end
       )
     end
-    Sodalite::Route[:get, '/tail', run: run]
+    Sodalite::Route[:get, '/tail', responses: { 200 => CHUNK }, run: run]
   end
 
   def drain(triple)
@@ -57,7 +57,7 @@ class StreamTest < Minitest::Test
         end
       )
     end
-    route = Sodalite::Route[:get, '/tail', run: run]
+    route = Sodalite::Route[:get, '/tail', responses: { 200 => CHUNK }, run: run]
     handlers = Sodalite::Effects.fixed({ rows: ->(_payload) { [{ seq: 9, text: 'z' }] } })
 
     triple = Sodalite::App.new(routes: [route], handlers: handlers).call(env(:get, '/tail'))

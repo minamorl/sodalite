@@ -85,13 +85,21 @@ module Sodalite
     end
 
     def build(base, effects)
-      Berylx::EffectTree.real_handlers(base.merge(check(effects)))
+      freeze_map(Berylx::EffectTree.real_handlers(base.merge(check(effects))))
     end
 
     # Wrap an interpreter so an aspect reaches into `parallel`, `branch`, and
     # `rescue` subtrees too. The routes are never rewritten to add one.
     def around(effects = {}, &)
-      Berylx::EffectTree.around(defaults.merge(check(effects)), &)
+      freeze_map(Berylx::EffectTree.around(defaults.merge(check(effects)), &))
+    end
+
+    # A capability may contribute a structured handler value. Freezing only
+    # the outer world would still leave that shared structure writable after
+    # boot, so maps inside the map cross the same immutable boundary.
+    def freeze_map(map)
+      map.each_value { |value| freeze_map(value) if value.is_a?(Hash) }
+      map.freeze
     end
 
     # An application that took `:sodalite_clock` would silently unhook the
