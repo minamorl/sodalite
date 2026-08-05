@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'monitor'
+
 module Sodalite
   module DB
     # An instance functor `I : C -> Set`, stored as sets of rows and evaluated by
@@ -20,7 +22,11 @@ module Sodalite
         @schema = schema.is_a?(History) ? schema.schema : schema
         @store = @schema.names.to_h { |name| [name, []] }
         seed.each { |table, rows| rows.each { |row| insert(table, row) } }
-        @lock = Mutex.new
+        # A `Monitor`, not a `Mutex`, because one thread reaches this twice: a
+        # scope nests inside a scope, and `Ledger#migrate!` claims the migration
+        # lock from inside one. `Mutex` answers a second take with `ThreadError`.
+        @lock = Monitor.new
+        @depth = 0
         @lock_token = nil
       end
 
@@ -155,12 +161,37 @@ module Sodalite
       # A snapshot is enough here because the store is plain data. Rollback is
       # not an operation the caller asks for; it is what `Err` means to this
       # handler.
+      #
+      # `DB.atomically` is a combinator, so being composed — and therefore
+      # nested — is its premise, and a nested scope joins the outermost one
+      # instead of opening a second. It gets no savepoint of its own: the
+      # snapshot is taken once on the way in at depth zero and restored once on
+      # the way out, if the *outermost* scope's result is an `Err`. An inner
+      # scope runs the block and hands the result back untouched. This is the
+      # reading all three models spell identically — `Sql` emits one `BEGIN`,
+      # `Sequel` joins its outer transaction — and `Berylx`'s `sequence`
+      # short-circuits on the first `Err`, so an inner failure normally *is* the
+      # outer failure.
+      #
+      # The cost, and it is the same cost in all three: recovering from an inner
+      # `Err` with a `rescue` combinator commits, because the outermost scope is
+      # the only one that decides.
+      #
+      # `@depth` is a plain ivar, which is safe because it is only read or
+      # written with the monitor held and the outermost scope has already put it
+      # back to zero when the monitor is released — so a thread that was waiting
+      # at the door sees zero and gets its own outermost scope, never half of
+      # somebody else's.
       def atomically
         @lock.synchronize do
-          snapshot = @store.transform_values { |rows| rows.map(&:dup) }
+          outermost = @depth.zero?
+          @depth += 1
+          snapshot = @store.transform_values { |rows| rows.map(&:dup) } if outermost
           result = yield
-          @store = snapshot if result.is_a?(Berylx::Err)
+          @store = snapshot if outermost && result.is_a?(Berylx::Err)
           result
+        ensure
+          @depth -= 1
         end
       end
 
