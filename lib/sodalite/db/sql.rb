@@ -243,15 +243,27 @@ module Sodalite
       public
 
       # Same shape as the memory model's: the caller never asks for a rollback,
-      # it is what `Err` means here too.
+      # it is what `Err` means here too, and a nested scope joins the outermost
+      # one rather than opening a second — `Memory#atomically` carries the prose
+      # for why, and what it costs. Here the counter decides who says `BEGIN`
+      # and who gets to end it; an inner scope says neither, because SQL has no
+      # second `BEGIN` to give it.
+      #
+      # `@depth` is not a constructor line because a scope is the only thing
+      # that ever moves it, and the `ensure` is what keeps a raise from leaving
+      # it behind.
       def atomically
-        @connection.execute('BEGIN', [])
+        @depth = (@depth || 0) + 1
+        outermost = @depth == 1
+        @connection.execute('BEGIN', []) if outermost
         result = yield
-        @connection.execute(result.is_a?(Berylx::Err) ? 'ROLLBACK' : 'COMMIT', [])
+        @connection.execute(result.is_a?(Berylx::Err) ? 'ROLLBACK' : 'COMMIT', []) if outermost
         result
       rescue StandardError
-        @connection.execute('ROLLBACK', [])
+        @connection.execute('ROLLBACK', []) if outermost
         raise
+      ensure
+        @depth -= 1
       end
     end
   end

@@ -72,11 +72,22 @@ module Sodalite
       # Same contract as the other two: the caller never asks for a rollback, it
       # is what `Err` means to the scope. `Sequel::Rollback` is how Sequel spells
       # "unwind without raising past me".
+      #
+      # A nested scope joins the outermost one, which is what `Memory#atomically`
+      # spells out and what `Sequel::Database#transaction` already does by
+      # default — so the depth counter is Sequel's own, asked for by name. What
+      # Sequel does *not* do is scope the rollback: a `Sequel::Rollback` raised
+      # inside a joined block is not caught by that block's own `transaction`
+      # call, it escapes to the outermost one, taking the inner scope's result
+      # with it. So an inner scope does not raise at all. It returns its `Err`
+      # and lets the outermost scope decide, which is also how the other two
+      # models read it.
       def atomically
+        outermost = !@db.in_transaction?
         result = nil
         @db.transaction do
           result = yield
-          raise ::Sequel::Rollback if result.is_a?(Berylx::Err)
+          raise ::Sequel::Rollback if outermost && result.is_a?(Berylx::Err)
         end
         result
       end
