@@ -33,12 +33,22 @@ module Sodalite
       end
 
       # `ADD COLUMN` leaves existing rows NULL, while the induced map on instances
-      # says the column is the constant default. The backfill is not optional.
+      # says the column is the constant default. The backfill is not optional —
+      # but rewriting every row to supply a constant is a cost the hand-written
+      # emitter stopped paying, and the two models pay the same costs or the
+      # conformance between them is only about answers.
+      #
+      # So the default is declared on the column, where the backend fills the
+      # existing rows from the schema, and the update is narrowed to the rows
+      # that are still missing a value: a no-op once the declaration has done it,
+      # and safe to run again after an interrupted migration. Sequel spells both,
+      # because it is the backend here and the dialect is its to know.
       def add_column(table, field, default)
         definition = @schema.table(table)
         type = type_of(definition, field)
-        @db.alter_table(table) { add_column(field, type) }
-        @db[table].update(field => default) unless default.nil?
+        options = default.nil? ? {} : { default: default }
+        @db.alter_table(table) { add_column(field, type, **options) }
+        @db[table].where(field => nil).update(field => default) unless default.nil?
       end
 
       def merge_tables(sources, into, tag)
