@@ -58,11 +58,22 @@ bundle install
 bundle exec rake              # tests + rubocop
 bundle exec rake test
 bundle exec rubocop
-ruby -Ilib examples/service/app.rb          # the whole service, against a fixed world
-ruby -Ilib examples/service/app.rb openapi  # its published document
-ruby -Ilib examples/service/boot.rb         # the same service on puma
-ruby -Ilib examples/minimal.rb              # the smallest thing that runs
+bundle exec ruby -Ilib examples/service/app.rb          # the whole service, against a fixed world
+bundle exec ruby -Ilib examples/service/app.rb openapi  # its published document
+bundle exec ruby -Ilib examples/service/boot.rb         # the same service on puma
+bundle exec ruby -Ilib examples/minimal.rb              # the smallest thing that runs
 ```
+
+`bundle exec` is not decoration. `zeolite`, `berylx`, and `darkcore` are unpublished and resolve
+from git, so they exist only inside the bundle; a bare `ruby -Ilib` fails at
+`cannot load such file -- zeolite` no matter what `-I` says. If the system gem directory is not
+writable, keep the bundle in the working copy — `bundle config set --local path vendor/bundle` —
+rather than installing as root.
+
+Working on `zeolite` and this library at once: point the bundle at the checkout with
+`bundle config set --local local.zeolite /path/to/zeolite` instead of editing the `Gemfile`. The
+override lives in `.bundle/config`, which is not tracked, so one machine's layout never becomes
+everyone's dependency.
 
 `test/puma_test.rb` boots real Puma on an ephemeral port; it is the one suite that needs a socket.
 
