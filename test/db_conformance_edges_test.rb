@@ -141,10 +141,10 @@ class DBConformanceEdgesTest < Minitest::Test
                            'the image is a set of tuples, not of rows'],
     'a presentation' => [->(s) { s[:users].order(:name) },
                          'delete needs a subobject of users, and order is not one — ' \
-                         'a window on a deletion is not a subobject'],
+                         'a window is a presentation of the rows, not a subobject of them'],
     'a window' => [->(s) { s[:users].order(:name).limit(1) },
                    'delete needs a subobject of users, and order is not one — ' \
-                   'a window on a deletion is not a subobject'],
+                   'a window is a presentation of the rows, not a subobject of them'],
     'a fold' => [->(s) { s[:users].group(:city).count(:people) },
                  'delete needs a subobject of users, and group is not one — a fold yields groups, not rows']
   }.freeze

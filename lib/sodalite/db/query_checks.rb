@@ -49,7 +49,7 @@ module Sodalite
       # that will not say which operation was refused is a refusal the reader has
       # to guess at from the stack.
       def subobject!(operation, verb, confirm_carrier)
-        window = "a window on a #{operation} is not a subobject"
+        window = 'a window is a presentation of the rows, not a subobject of them'
         refuse_subobject!(operation, :select, 'the image is a set of tuples, not of rows') if projection
         refuse_subobject!(operation, :group, 'a fold yields groups, not rows') if grouped?
         refuse_subobject!(operation, :union, 'the coproduct is not an object of the schema') if united?
