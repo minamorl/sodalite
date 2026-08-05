@@ -19,9 +19,15 @@ HISTORY = Sodalite::DB.history(
   [:create_table,     :posts, { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }]
 )
 
-HISTORY.schema          # the composite — nothing is declared twice
-HISTORY.schema_at(2)    # a version is how far along the composite a database got
+HISTORY.schema           # the composite — nothing is declared twice
+HISTORY.schema_after(2)  # the composite of the first two steps of `plan.order`
 ```
+
+`after` is the unit, and the unit is a count of steps along the **solved** order — the same number
+line `rollback!(to:)` indexes, so a number cannot name one prefix to the reader and another to the
+runner. `spec_after`, `schema_after`, and `reversible_after?` all read it that way. Counting along
+declaration order would be counting along the one thing in a history that carries no meaning, which is
+the whole reason `Plan` exists.
 
 Which makes reversibility a property rather than a promise:
 
@@ -36,19 +42,27 @@ Which makes reversibility a property rather than a promise:
 | `split_table` | the decomposition of that coproduct along the tag | reversible |
 
 ```ruby
-HISTORY.reversible_to?(0)   # => true
-HISTORY.irreversible_steps  # => []
+HISTORY.reversible_after?(0)  # => true
+HISTORY.irreversible_steps    # => []
 ```
 
 That answer arrives **before anything runs**, because losing information is exactly what a
 non-injective map does. It is not a warning printed after the rollback failed.
 
-Both models carry the history: the in-memory one transforms rows, the SQL one derives DDL. The
-conformance discipline extends to "migrate, then query" — and it immediately earned its keep again.
-`ALTER TABLE ADD COLUMN` leaves existing rows `NULL`, while the induced map says the column is the
-constant default, so the two models disagreed until the backfill was added. The ledger records each
-step's fingerprint, so a migration edited after it ran is caught rather than silently re-meaning
-something.
+All three models carry the history: the in-memory one transforms rows, the hand-written SQL one
+derives DDL text, the Sequel one reshapes through a backend that knows the dialect. The conformance
+discipline extends to "migrate, then query" — and it immediately earned its keep again. `ALTER TABLE
+ADD COLUMN` leaves existing rows `NULL`, while the induced map says the column is the constant
+default, so the models disagreed until the backfill was added. The ledger records each step's
+fingerprint, so a migration edited after it ran is caught rather than silently re-meaning something.
+
+The backfill is now the *fallback* rather than the mechanism: the default is declared on the column,
+where Postgres 11+ and SQLite fill existing rows out of the schema without touching one, and the
+`UPDATE ... WHERE ... IS NULL` that follows is narrowed to the rows still missing a value. That makes
+it a no-op wherever the declaration worked and idempotent wherever a migration was interrupted. **On
+a backend where the declaration does not fill, it is still one full scan.** Cutting it into key ranges
+would need the emitter to know how many rows there are, and it knows the presentation and nothing
+about the instance.
 
 `Σ_F` — merging two objects into their coproduct, tagged by which injection each element came
 through — is here, and so is its inverse. The two tables must share a shape, which is not a
@@ -79,6 +93,49 @@ fingerprint mismatch on migrations nobody touched.
 Declaring the same step twice is refused at declaration. A step *is* its content,
 so the two are one step, and a ledger keyed by content cannot tell them apart.
 
+### The content address, and the one time it changed
+
+"A step's identity is its content" is only as good as the function that computes
+it. That function used to be `args.inspect`, and `inspect` renders a Hash in the
+order its keys were inserted — so permuting the fields of a `create_table`, a
+refactor that changes no meaning, minted a second address for the same step, and
+a ledger keyed by address then called an applied step unapplied.
+
+It is now a normalised, prefix-free serialisation carried under a `v1` scheme
+tag. A Hash's keys are sorted; an Array's order is kept, because `merge_tables`
+takes a *sequence* of sources and which one is the first injection is part of
+what the step says; each atom names its kind and its byte length, so `:1`, `'1'`
+and `1` are three renderings and no separator can be forged from inside a string;
+a value the normaliser has no rendering for raises rather than falling back to
+`inspect`. The scheme tag lives inside the digest input rather than beside it, so
+a later change to the rules produces visibly different addresses instead of
+silently colliding with the old ones.
+
+**Every fingerprint changed.** A database migrated under the old scheme presents
+a ledger this code does not recognise: `verify!` sees no fingerprint it declares
+and refuses, and `migrate!` would carry every step again against a shape that
+already has it. There is no automatic conversion — writing one would mean keeping
+the old normalisation in the code to recompute the addresses it produced, and a
+scheme tag whose predecessor is still present is not a scheme tag. The recovery
+is by hand: read `HISTORY.fingerprints` under this checkout and rewrite the
+`fingerprint` column of `sodalite_migrations` to match, step for step, before
+starting the new code against that database.
+
+### A history cannot adopt a database it did not create
+
+`Plan#check_unprovided!` refuses a history whose requirements nobody supplies, so
+the first steps are always the `create_table`s that bring every object into
+being. There is no `assume_table`, no baseline step, and no way to say "this one
+is already there".
+
+That is a decision rather than a missing feature. A step asserting that an object
+already exists would be a step whose meaning depends on the database rather than
+on the history, and every other guarantee here rests on the opposite premise —
+that the history is the whole account of what a database is, and the ledger is
+where it is recorded. Adopting a database means writing the history that would
+have produced it and seeding the ledger by hand, which is the same work as the
+scheme change above and has the same shape.
+
 ### Applying is one explicit command, and never a side effect of boot
 
 ```ruby
@@ -93,12 +150,53 @@ hosts, so a boot-time migration has no single writer and "who applied this" has 
 answer. And a migration that runs at boot runs during a *rollback* too — at the
 one moment nobody wants schema changes.
 
+One step is also one transaction, which is why a model that cannot put DDL in one
+is refused outright:
+
+```ruby
+Sodalite::DB.sql(HISTORY, connection, transactional_ddl: false).migrate!(HISTORY)
+# => MigrationError: Sodalite::DB::Sql cannot migrate!: this database has no
+#    transactional DDL, ...
+```
+
+The port is `execute(sql, binds) -> rows` and has nowhere to put the question, so
+the caller answers it once where the connection is built; `true` is the default
+because SQLite and Postgres both have it, and `DB.sequel` answers for itself.
+Without the scope, `carry` and `record_step` are two writes with a gap: an
+interruption between them leaves the database changed and the ledger silent, and
+the next run carries the step again against a shape that already has it. There is
+no override keyword, because a refusal an argument can waive is not a refusal —
+and what the waiver would buy is exactly the hand recovery it already names.
+
+### The lock has a holder, and clearing it is explicit
+
 `migrate!` takes a lock, so the single writer is a mechanism rather than a wish.
-A runner that dies mid-migration leaves the lock behind; the error says so, and
-clearing it is a human `DELETE FROM sodalite_migration_lock`. That is a deliberate
-choice over a lease with a timeout: a timeout that expires while the first runner
-is merely slow gives you two writers, which is the thing the lock existed to
-prevent.
+The row carries a token, the holder, and the time it was taken, so a refusal names
+the runner that is in the way instead of speculating that one crashed:
+
+```
+another migration is running: <host>:<pid> has held the lock since
+2026-08-05T05:19:45Z (1204s); if that runner is gone, clear it with
+steal_lock!(older_than: <seconds>)
+```
+
+A runner that dies mid-migration leaves the lock behind, and clearing it is one
+explicit call:
+
+```ruby
+model.steal_lock!(older_than: 900)
+# => "cleared the migration lock held by <host>:<pid> since 2026-08-05T05:19:45Z (1204s)"
+```
+
+(`<host>:<pid>` is what the holding process wrote — `Socket.gethostname` and its
+own pid — and the age is real; only those two are substituted here.)
+
+`older_than` is in seconds and has **no default**, because only the caller knows
+how long the migration it is about to displace normally takes; a younger lock is
+left alone and the refusal says by how much. That is a deliberate choice over a
+lease with a timeout: a timeout that expires while the first runner is merely slow
+gives you two writers, which is the thing the lock existed to prevent. Making the
+caller name the age moves the same judgement to the one place that can make it.
 
 ### Boot verifies, and refuses
 
@@ -120,6 +218,27 @@ answers:
 - **A ledger holding steps this checkout does not declare → refuse.** The
   database is ahead of the code, which means an old release is being started
   against a newer database, and it says exactly that.
+
+**`verify!` reads the ledger and nothing else.** That is the premise all three
+answers rest on, and it is worth stating rather than leaving to be discovered:
+what a database *is* has one recorded history, and the ledger is where it is
+recorded. Nothing reads the catalog, compares a column type, or looks at a row.
+
+So a database someone hand-altered passes. A column added by hand, a table dropped
+by hand, a type widened by hand, a row rewritten by hand — none of it is visible
+here, and a database can hold every declared fingerprint without having the shape
+the history describes.
+
+That is the right default rather than a hole. A check that re-derived the shape
+from the catalog would be a second opinion about what the database is, and it
+would have to be told which differences are allowed — an unapplied contraction is
+a legal difference, and so is an index somebody added on a slow morning. One truth
+that can be wrong is better than two that disagree about which of them is.
+
+`create_tables_for_test!` is the same gap approached from the other side. It builds
+the whole schema in one shot with **no ledger entries at all**, so `verify!`
+refuses the result with *database is missing required migrations* — which is what
+the name is for. Anything that boots against `verify!` goes through `migrate!`.
 
 ### A release contains expansions, or it contains contractions
 
@@ -158,8 +277,12 @@ of a claim someone made in a pull request.
 ### Rolling back
 
 ```ruby
-model.rollback!(HISTORY, to: 3)
+model.rollback!(HISTORY, to: 3)   # keep the first three steps of the solved order
 ```
+
+`to:` counts along `plan.order`, which is the same unit `reversible_after?` and
+`schema_after` take — so "reversible to 3" and "roll back to 3" name the same
+prefix rather than two that happen to coincide.
 
 The inverses are walked in reverse, and the range is checked **before the first
 statement runs**: if anything in it forgets information, nothing happens and the
@@ -173,10 +296,29 @@ it, because the database will not.
 
 ### What this does not decide
 
-- **Clearing a stale lock is manual**, for the reason above.
-- **The SQL model's lock targets SQLite and Postgres.** MySQL wants `FROM DUAL`;
-  the Sequel model already spells it per dialect, which is the reason that backend
-  exists.
+- **Clearing a stale lock is manual**, for the reason above. `steal_lock!` is the
+  call; deciding what counts as stale is the operator's.
+- **The hand-written model's dialect surface is ANSI, and that is a claim about
+  quoting rather than about the lock.** The lock is a plain `INSERT ... VALUES`
+  now and needs no dialect. What does: every identifier is emitted in ANSI double
+  quotes, which SQLite and Postgres read as an identifier and MySQL reads only
+  under `ANSI_QUOTES`; and `transactional_ddl:` defaults to `true`, which is right
+  for those two and wrong for MySQL, where it must be passed `false` and
+  migrations are then refused. `DB.sequel` is the answer to both, which is the
+  reason that backend exists.
+- **`:boolean` is not usable with the hand-written model.** `sql_type` maps it to
+  `TEXT` and the sqlite3 driver will not bind `true` at all. Pre-existing, and
+  named here rather than left to be found on an insert.
+- **Two things are still read in declaration order.** `History` bootstraps a
+  presentation per step before any order exists, so a `rename_table` or
+  `split_table` declared *before* the step that creates its object raises
+  `KeyError` at construction even though its solved order would be fine. And
+  `merge_tables` claims its target with a wildcard, so a later step supplying a
+  *new* name under the merged object — `merge` then `add_attribute` — cannot be
+  scheduled and comes back as a dependency cycle. Both are the same defect one
+  layer below the solver: a fact about a step read off the order it was typed in.
+  Declaring the creation first, and adding the attribute to both sources before
+  merging, are the ways around them, and they are the same migration.
 - **Nothing here schedules anything.** "Apply, then deploy" is a fact about which
   order is safe, not a pipeline. Wiring it into CI is the service's job.
 
