@@ -266,3 +266,40 @@ class DBDistinctTest < Minitest::Test
     assert_predicate LAWS_SCHEMA[:users].group(:city).count(:people), :distinct?
   end
 end
+
+# A foreign key column holds the target's key, so it has that key's type. Judging
+# it against `attributes` — which holds only the morphisms into leaf objects —
+# reports no type at all, and an order comparison on it is then refused for a
+# reason that is not true.
+class DBForeignKeyColumnTypeTest < Minitest::Test
+  KEYED_BY_STRING = Sodalite::DB.schema(
+    accounts: { id: :string, name: :string },
+    sessions: { id: :integer, account: Sodalite::DB.fk(:accounts) }
+  )
+
+  def test_an_order_comparison_on_a_foreign_key_column_is_a_subobject
+    query = LAWS_SCHEMA[:posts].where(:author, :gte, 2)
+
+    assert_equal [[:where, :author, 2, :gte]], query.steps
+  end
+
+  # The type comes from the target's key, whatever that key is declared to be —
+  # so a string-keyed target makes the column a string, and the order it carries
+  # is the string one. Read from `attributes` this column has no type, and the
+  # comparison is refused as if the type had no order.
+  def test_the_type_comes_from_the_targets_key
+    query = KEYED_BY_STRING[:sessions].where(:account, :gt, 'a')
+
+    assert_equal [[:where, :account, 'a', :gt]], query.steps
+    assert_equal :string, KEYED_BY_STRING.table(:sessions).column_type(:account)
+  end
+
+  # A key is not nullable, so the complement of a subobject of it is two-valued
+  # and `where_null` has nothing to eliminate.
+  def test_a_foreign_key_column_is_not_nullable
+    LAWS_SCHEMA[:posts].where(:author, :not, 1)
+    error = assert_raises(Sodalite::DB::QueryError) { LAWS_SCHEMA[:posts].where_null(:author) }
+
+    assert_match(/is not nullable/, error.message)
+  end
+end

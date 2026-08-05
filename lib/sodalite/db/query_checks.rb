@@ -119,13 +119,17 @@ module Sodalite
         raise QueryError, "#{operation} cannot follow union — the coproduct is not an object of the schema"
       end
 
+      # A foreign key column is an attribute too, once you ask what it holds: the
+      # target's key. Reading `attributes` here would judge `posts.author` to
+      # have no type at all, so an order comparison on it would be refused for a
+      # reason that is not true. `column_type` is the one place that resolves it.
       def nullable?(field, table = carrier)
-        declared = schema.table(table).attributes[field.to_sym]
+        declared = schema.table(table).column_type(field)
         declared.is_a?(Symbol) && declared.to_s.end_with?('?')
       end
 
       def base_type(field, table = carrier)
-        declared = schema.table(table).attributes[field.to_sym]
+        declared = schema.table(table).column_type(field)
         declared.is_a?(Symbol) ? declared.to_s.delete_suffix('?').to_sym : nil
       end
 
