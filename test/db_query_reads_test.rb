@@ -53,8 +53,8 @@ class DBQueryReadsWalkTest < Minitest::Test
   # Eliminating the `+ 1` is still consulting the map, and both directions of it
   # consult the same one.
   def test_a_null_filter_reads_the_field_it_eliminates
-    absent = READS_SCHEMA[:users].select(:id).where_null(:nickname)
-    present = READS_SCHEMA[:users].select(:id).where_present(:nickname)
+    absent = READS_SCHEMA[:users].select(:id, :nickname).where_null(:nickname)
+    present = READS_SCHEMA[:users].select(:id, :nickname).where_present(:nickname)
 
     assert_equal ['users', 'users.id', 'users.nickname'], places(absent)
     assert_equal places(absent), places(present)
@@ -112,7 +112,7 @@ class DBQueryReadsPullbackTest < Minitest::Test
   # against the key itself: it belongs to the object at the far end.
   def test_the_far_field_belongs_to_the_far_object_even_when_it_is_the_key
     plan = READS_SCHEMA[:sessions].where_at(:account, :plan, 'pro')
-    key = READS_SCHEMA[:sessions].select(:id).where_at(:account, :id, :gt, 'a')
+    key = READS_SCHEMA[:sessions].select(:id, :account).where_at(:account, :id, :gt, 'a')
 
     assert_equal ['accounts', 'accounts.plan', 'sessions', 'sessions.account', 'sessions.agent', 'sessions.id'],
                  places(plan)

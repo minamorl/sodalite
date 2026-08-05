@@ -2,6 +2,15 @@
 
 module Sodalite
   module DB
+    # Equality is the regular fragment. An order comparison is still an honest
+    # subobject *when the attribute type carries an order*, which is why the
+    # check is on the type rather than on taste. Negation is the one that
+    # genuinely breaks: `NOT (x = 3)` over a nullable column is three-valued, so
+    # it is refused there and allowed where the type is a plain set.
+    COMPARISONS = { eq: '=', not: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' }.freeze
+    ORDERED_TYPES = %i[integer float number time string].freeze
+    NO_OPERAND = ::Object.new.freeze
+
     # Everything an arrow can be wrong about, checked when it is built. A query
     # that fails on the one request that happens to exercise it is a query that
     # fails at 3am, so none of these wait until evaluation.
@@ -113,6 +122,7 @@ module Sodalite
       def check_nullable!(field, operation)
         check_fragment_open!(operation)
         check_field!(field)
+        check_in_image!(field, operation)
         return if nullable?(field)
 
         raise QueryError, "#{carrier}.#{field} is not nullable, so #{operation} is not a filter"
