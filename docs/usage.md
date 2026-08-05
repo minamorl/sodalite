@@ -134,9 +134,16 @@ That is not "a bad row". The morphism `author : posts → users` has no value at
 rows are not a functor at all. Referential integrity is not a rule imposed on rows; it is the
 condition for the instance to exist.
 
-`functor?` and `violations` are on **all three models** — `DB.memory` intersects sets, `DB.sql` takes
-two arrows and a set difference, `DB.sequel` runs two datasets — and the sentence they answer with
-comes from the schema, so three models cannot report one broken morphism in three wordings.
+`functor?` and `violations` are on **all three models** — `DB.memory` intersects sets, `DB.sql` and
+`DB.sequel` each ask the database for the anti-join in one statement — and the sentence they answer
+with comes from the schema, so three models cannot report one broken morphism in three wordings. All
+three sort on that sentence, so the list is comparable across models rather than across key types that
+need not be comparable to each other.
+
+**`violations` counts per element, not per missing key.** Two posts pointing at the absent user 99 are
+two failures of the functor and not one, so `violations.size` is `2` and the sentence appears twice.
+The morphism fails to have a value *at an element*, and the multiplicity is what "how far from being a
+functor" means — deduplicating it would answer a different question.
 
 ### Referential integrity is a diagnostic, not an invariant
 
@@ -276,7 +283,7 @@ the key.
 | --- | --- |
 | entities with behavior — `user.suspend!` | rows are Hashes; behavior is a named berylx task |
 | aggregates defining a consistency boundary | no aggregates — the boundary is `DB.atomically` around a workflow you name |
-| repositories | four verbs, and a "finder" is a **value**: `BY_CITY = ->(c) { SCHEMA[:users].where(:city, c) }` |
+| repositories | five operations, and a "finder" is a **value**: `BY_CITY = ->(c) { SCHEMA[:users].where(:city, c) }` |
 | invariants enforced inside the model | shape enforced by the schema; domain rules live in tasks that `reject` |
 | a lifecycle or state machine per entity | a berylx workflow; `branch` is the case analysis |
 | ubiquitous language expressed as classes | expressed in the names of tables, arrows, and tasks |
@@ -423,6 +430,25 @@ Comparing to `nil` is refused in every form, because SQL's answer to `x = NULL` 
 An unordered result is a **set** (`Relation`); an ordered one is a **sequence** (`Listing`). The
 distinction is kept because it is real.
 
+**`nothing` sorts after every element, in both directions.** An order has to be a function of the set,
+and a nullable column carries the adjoined point outright — `min`/`max` fold a fibre that is entirely
+nothing to it, so an ordering can meet a value no `?` in the schema mentioned. The backends had three
+answers there and none of them was about cost: `DB.memory` raised, sqlite sorted nothings first,
+postgres sorted them last. So the placement is stated rather than inherited, and it is *not* last
+ascending and first descending — `nothing` is not an element being ordered, it is the point adjoined to
+`A`, so reversing the order on `A` cannot move it.
+
+```ruby
+PLAYERS = Sodalite::DB.schema(players: { id: :integer, name: :string, score: :integer? })
+# scores 5, 9, and one player who has none — the same two lines in all three models
+model.select(PLAYERS[:players].order(:score)).map { |row| row[:score] }        # => [5, 9, nil]
+model.select(PLAYERS[:players].order(:score, :desc)).map { |row| row[:score] } # => [9, 5, nil]
+```
+
+Both SQL models say it as `NULLS LAST` on every ordering term, which needs **SQLite 3.30 or newer**.
+It is also what keeps a window meaning something: `order(:score, :desc).limit(3)` is the three largest
+scores, not a presentation of three absences of one.
+
 ### `follow` moves the carrier; `where_at` does not
 
 The question "which posts were written by someone in tokyo?" cannot be asked with `follow`, and the
@@ -458,7 +484,7 @@ The subquery is the image of the composite. Without it the count would report mu
 join rather than elements of the image — two different numbers, and only one of them answers "how many
 people".
 
-Three models satisfy the same four verbs:
+Three models satisfy the same five operations:
 
 ```ruby
 Sodalite::DB.memory(SCHEMA, seed)              # rows in Hashes, no database
@@ -468,6 +494,31 @@ Sodalite::DB.sequel(SCHEMA, Sequel.connect(…)) # dialects, pooling, type mappi
 
 They are checked against each other, which is what makes the in-memory one usable as the thing your
 tests run against rather than a stub returning what a test author decided.
+
+**The mandatory port is still one method.** `execute(sql, binds) -> rows` is the whole of what
+`DB.sql` requires, the gem depends on no driver, and every adapter written against it keeps working. A
+connection may *also* answer `change(sql, binds) -> Integer` — how many rows the statement affected —
+and `DB.sql` asks with `respond_to?` rather than taking a flag, so declaring it is a capability rather
+than a requirement and there is nothing for a caller to get wrong. Where it is declared, a change or a
+deletion is one statement:
+
+```ruby
+def change(sql, binds) = (execute(sql, binds); @db.changes)
+```
+
+```
+# execute only                          # execute + change
+BEGIN                                   UPDATE "items" SET "stock" = "stock" + ? WHERE "stock" > ?
+SELECT COUNT(*) FROM "items" WHERE …
+UPDATE "items" SET "stock" = …
+COMMIT
+```
+
+Both answer `2`. Without `change` the count has to be *measured*, and measured before the statement,
+because a change moves rows out of the subobject that named them — `stock = stock - 1` under
+`stock > 0` is exactly that — with both readings in one scope so nothing can move a row between them.
+A deletion is the same trade: with `change` it is one `DELETE` carrying the guard and no doomed row is
+read at all; without it, the keys go out chunked and what left is measured against them.
 
 **Prefer `DB.sequel` in production.** Both SQL models quote every identifier they emit, so a table
 called `order` works in either; what is left is what a backend is for. Sequel spells `OFFSET` without
@@ -485,10 +536,11 @@ two, and because it is the only one that shows what the compilation actually is.
 The database is not a set of invented verbs. The signature is fixed and small:
 
 ```
-SELECT(query)       -> Relation
-INSERT(table, row)  -> key
-DELETE(query)       -> count
-ATOMICALLY(subtree) -> Ok / Err
+SELECT(query)          -> Relation
+INSERT(table, row)     -> key
+UPDATE(query, changes) -> count
+DELETE(query)          -> count
+ATOMICALLY(subtree)    -> Ok / Err
 ```
 
 so a task asks for what it wants by tag, and the handler map decides what answers:
@@ -499,6 +551,94 @@ load_user = Berylx::Task[:load_user] do |lay, io|
   found.empty? ? lay.reject(:not_found, 'no such user') : lay[:user].set(found.rows.first)
 end
 ```
+
+### Changing a value is `UPDATE`, and the reason is not convenience
+
+Four operations can already change a value: `SELECT` the row, `DELETE` it, `INSERT` the changed
+version, inside `atomically`. That is atomic, and atomic is not enough. A plain `BEGIN` on postgres is
+READ COMMITTED, so two scopes both read `stock = 1`; the second's `DELETE` blocks until the first
+commits, then re-evaluates its `WHERE` against a row that is already gone, removes nothing, and inserts
+a row computed from the read it took before any of that happened. One decrement is lost and the item is
+oversold.
+
+A fifth operation that only assigned literals would carry the same hazard, because the hazard is not
+the number of statements — it is where the new value came from. `SET stock = 0` computed that `0` from
+a read taken earlier, and the row it lands on need not be the row that was read. What removes it is
+writing the change as a **function of the current value**, with the guard evaluated **inside the same
+statement**:
+
+```ruby
+SHOP = Sodalite::DB.schema(
+  items:  { id: :integer, name: :string, stock: :integer },
+  orders: { id: :integer, item: Sodalite::DB.fk(:items) }
+)
+IN_STOCK = ->(id) { SHOP[:items].where(:id, id).where(:stock, :gt, 0) }
+
+reserve = Berylx::Task[:reserve] do |lay, io|
+  taken = io.perform(Sodalite::DB::UPDATE,
+                     [IN_STOCK.call(lay[:item].get), { stock: Sodalite::DB.add(-1) }])
+  taken.zero? ? lay.reject(:sold_out, 'nothing left to reserve') : lay[:taken].set(taken)
+end
+```
+
+Run twice against one unit of stock — the same two lines from `DB.memory` and from `DB.sql`:
+
+```
+Ok  taken=1
+Err sold_out: nothing left to reserve
+```
+
+```sql
+UPDATE "items" SET "stock" = "stock" + ? WHERE "id" = ? AND "stock" > ?
+```
+
+The `0` is the point. A caller learns it lost the race *from the count*, rather than by reading the row
+back and finding stock below zero. The engine evaluates `stock > 0` while it holds the row and computes
+`stock + (-1)` from whatever the value is by then, so there is no earlier read for either scope to have
+acted on. The arrow never sees the value, which is what leaves nothing for it to have seen too early.
+(`DB.memory` reaches the same place by a different route — it names the rows and applies the change
+under one monitor — which is why the two print the same two lines.)
+
+**The vocabulary is closed.** `DB.add(delta)` and `DB.set(value)`, and a bare value in the changes Hash
+means `:set` — `{ state: 'sold' }` and `{ state: DB.set('sold') }` are one change. There is no
+`subtract`: a decrement is `add` of a negative delta, which leaves one operation to check, one to
+compile, and one for three models to agree about. It is deliberately not an expression language, on the
+rule that kept `avg` out of the aggregates — what is offered is what carries a law.
+
+**What an update refuses**, all of it when the call is made and before any statement is emitted:
+
+| refusal | why |
+| --- | --- |
+| everything a deletion refuses — a projection, a fold, a coproduct, a window | an update names rows of the carrier, and none of those is a subobject of them |
+| a composition that moved the carrier, unless `confirm_carrier:` says so | the rows are the codomain's, which is almost never what was meant |
+| a **pullback** guard (`where_at` / `where_along`) | a join inside `UPDATE` is dialect-bound, so evaluating that guard means an earlier `SELECT` — the lost update this exists to remove |
+| an empty change | the identity; a statement that changes nothing is not an operation on rows |
+| the carrier's **key** | identity is not a value to reassign, so the models would no longer agree about which row they changed |
+| `:add` on a column whose type carries no addition | strings have concatenation, which is a different monoid; times have a difference and no sum |
+
+A *composition* is allowed where a pullback is not, and the difference is that it can be compiled
+without leaving the statement: the join goes in a subquery and the update names its rows by the key
+that subquery selects.
+
+```ruby
+model.update(SHOP[:orders].where(:id, 10).follow(:item),
+             { stock: Sodalite::DB.add(-1) }, confirm_carrier: :items)
+# UPDATE "items" SET "stock" = "stock" + ? WHERE "id" IN (
+#   SELECT "t1"."id" FROM "orders" "t0" JOIN "items" "t1" ON "t0"."item" = "t1"."id"
+#   WHERE "t0"."id" = ?)
+```
+
+Two semantics all three models agree on, and both come up in ordinary use:
+
+- **`:add` on a `nothing` leaves the `nothing`, and the row still counts.** A nullable column is a map
+  into `A + 1`; `+ delta` is a function on `A`; exactly one extension of it to `A + 1` leaves the
+  coproduct alone — `+ delta` on `A`, the identity on the adjoined point, which is fixed because there
+  is no element there to add to. It is also what SQL computes unaided, since `NULL + 1` is `NULL`, so
+  no model needs a special case. Reading the nothing as zero would invent an element the instance never
+  recorded.
+- **The count is rows the change was applied to**, not rows whose value came out different.
+  `DB.add(0)` counts its row. Anything else would mean reading values back to compare them, and it is
+  what a SQL `UPDATE` reports on its own.
 
 Transactions read as a combinator:
 
@@ -962,6 +1102,12 @@ the reason in hand.
 | `KeyError`: *key not found* from `DB.history` | a `rename_table` or `split_table` declared before the step that creates its object; presentations bootstrap in declaration order |
 | `SchemaError`: *arrives at* / *has no morphism* | a path equation whose sides land on different objects, or that names a morphism the schema does not have |
 | `QueryError`: *has no morphism … to pull back along* | a `where_at` / `where_along` path that is not a path in the schema |
+| `QueryError`: *needs a subobject of …* | `delete` or `update` through a projection, a fold, a coproduct, or a window |
+| `QueryError`: *would change rows of …* | a composition moved the carrier; pass `confirm_carrier:` to mean it |
+| `QueryError`: *cannot be guarded by a pullback* | an update guarded by `where_at` / `where_along`; the guard has to be evaluated inside the statement, and a join there is not portable |
+| `QueryError`: *needs a change* | an empty changes Hash, which is the identity |
+| `QueryError`: *is the identity of a row, not a value to reassign* | a change of the carrier's key |
+| `QueryError`: *carries no addition* | `DB.add` on a column whose type has no sum |
 | 500 with `contract` in the log | the response did not fit its declared schema under `Effects.real` |
 | 400 on `?page=` | an empty query value is present-and-empty, not absent |
 

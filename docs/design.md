@@ -149,13 +149,32 @@ has an answer you can read instead of infer.
 "The world is a parameter" is weakest where the world is a database, because a handler map for
 `:find_user` and `:insert_user` is a model of nothing in particular — the verbs are whatever the
 application invented, and no equation relates them. `Sodalite::DB` replaces that part of the
-signature with a fixed one (`SELECT`, `INSERT`, `DELETE`, `ATOMICALLY`) over a schema that is a
-finitely presented category, so a handler map for those four is a *model of the relational theory*
-and the in-memory one is a model rather than a stub. [The RDBMS note](rdbms.md) works it out;
+signature with a fixed one (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `ATOMICALLY`) over a schema that
+is a finitely presented category, so a handler map for those five is a *model of the relational
+theory* and the in-memory one is a model rather than a stub. [The RDBMS note](rdbms.md) works it out;
 [the migration note](migrations.md) does the same for schema change.
 
-Two decisions there are design-level rather than API-level, and both belong in this document because
-both are choices about what the framework will and will not hold for you:
+**That signature was four, and widening a fixed signature deserves to be said rather than done
+quietly.** The heading is not a count. It says the verbs are not the application's to invent, and
+`UPDATE` was not invented: the design note proposed `Update(Subobject, Delta) -> Count` in the same
+list as the other three, in the commit that predates the one adding `lib/sodalite/db.rb`, because it
+is what the relational theory already names. The four that shipped first were an incomplete model of
+the theory, not a smaller theory, and the difference shows in what four could not do safely. Changing
+a value with four means `SELECT`, `DELETE`, `INSERT` inside `ATOMICALLY`, which is atomic and not
+serialisable under READ COMMITTED, so two scopes decrementing one unit of stock oversell it between
+them. A fifth operation that assigned literals would have had the same defect. What does not is a
+change written as a function of the value it replaces, with the guard evaluated inside the statement
+that applies it — which is exactly the `Delta` the note wrote down, and the reason the vocabulary is
+two closed constructors (`set`, `add`) rather than an expression language.
+
+The rule the heading is really about is the one that decided that closure: **what is offered is what
+carries a law.** It is the same rule that keeps `avg` out of the aggregates for not being a monoid,
+`join` out of the query language for being what a compiler emits, and `subtract` out of the changes
+for being `add` of a negative. A sixth operation would need the same argument, and "a caller would
+find it convenient" is not that argument.
+
+Two more decisions there are design-level rather than API-level, and both belong in this document
+because both are choices about what the framework will and will not hold for you:
 
 - **Integrity is reported, not enforced.** An instance is a functor into `Set`, so a dangling foreign
   key is a failure to be a functor rather than a bad row — but `insert` does not check it, `delete`

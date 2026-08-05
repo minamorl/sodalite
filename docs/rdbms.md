@@ -47,6 +47,13 @@ An **instance** is a functor `I : C → Set`. Each table goes to its set of rows
 to an actual function between those sets. A dangling foreign key is not a bad row, it is a failure to
 be a functor.
 
+Which decides how the failures are counted, and it is not a rounding decision. The morphism fails to
+have a value **at an element**, so two posts pointing at one absent user are two failures rather than
+one: `violations.size` is the number of elements where the functor does not exist, which is what "how
+far from being a functor" has to mean. Deduplicating by the missing key would answer a different
+question — how many holes there are in the target — and all three models report the multiplicity, on
+a sentence that comes from the schema and that all three sort on.
+
 The part that matters for this codebase: **zeolite already supplies the attribute types.** A row type
 is a zeolite schema, a row is a generated `Data`, so `I(users)` is a set of `User` values with the same
 type discipline as the HTTP boundary. That is not a coincidence to enjoy, it is the reason this is
@@ -174,6 +181,55 @@ rules fall straight out and both are build errors:
 - **An order must be total**, or ties break arbitrarily and the models are free to disagree. So
   the identifying fields are appended, and `total_ordering` is what actually runs.
 
+And one that had to be *decided* rather than derived. The order is on `A + 1`, because that is what a
+presentation actually has to order: a nullable column carries the adjoined point outright, and phase
+two hands one over unprompted, since `min`/`max` are monoids on `(A + 1, min/max, nothing)` and a fibre
+that is entirely nothing folds to the identity. So an ordering meets a value the column's declared type
+never mentioned, and the three backends each had an answer of their own there — `DB.memory` raised,
+sqlite sorted the nothings first, postgres sorted them last. Two SQL backends disagreeing with each
+other is a disagreement about a value, not about cost.
+
+**`nothing` sorts after every element of `A`, in both directions.** Not last ascending and first
+descending: it is not an element being ordered, it is the point adjoined to `A`, so the order on `A`
+never reaches it and reversing that order cannot move it. One rule, no case analysis, and the emitted
+text says which order it is — `NULLS LAST` on every ordering term in both SQL models, which is the
+sentence `DB.memory` spells as a comparison that puts `nil` last before the direction is applied.
+(`NULLS LAST` needs SQLite 3.30 or newer.) It is also what keeps a window meaning something:
+`order(:score, :desc).limit(3)` is the three largest scores rather than a presentation of three
+absences of one.
+
+### The write side: an arrow names rows, and a change is a function of their values
+
+Phase one yields a **subobject**, and a subobject is the argument two operations other than `Select`
+take. `Delete` removes the rows it names; `Update` applies a change to them. Neither is a fourth
+phase — they consume phase one and refuse the other two, because a fold yields groups and a
+presentation yields a chosen sequence, and neither of those is a set of rows of the carrier.
+
+What `Update` adds to that refusal is one more, and it is the reason the operation exists rather than a
+detail of it: **its guard cannot be a pullback.** A pullback compiles to a join, a join inside an
+`UPDATE` is dialect-bound (`UPDATE … FROM` on postgres, another spelling elsewhere, nothing portable),
+and the only portable way to allow it is to evaluate the guard in a `SELECT` taken before the
+statement — which is exactly the stale read the operation was built to remove. A *composition* is
+allowed, because it can be compiled without leaving the statement: the join goes in a subquery and the
+statement names its rows by the key that subquery selects.
+
+The change itself is a closed vocabulary, `:set` and `:add`, and the closure is the same discipline as
+`avg`'s absence. `:add` names the column on both sides, so the new value is computed by the engine from
+whatever the old one is by the time it holds the row:
+
+```sql
+UPDATE "items" SET "stock" = "stock" + ? WHERE "id" = ? AND "stock" > ?
+```
+
+Two readings follow from `A + 1` and from what a count can honestly mean, and all three models agree on
+both. **`:add` on a `nothing` leaves the `nothing`, and the row still counts**: `+ delta` is a function
+on `A`, and exactly one extension of it to `A + 1` leaves the coproduct alone — the identity on the
+adjoined point, which is fixed because there is no element there to add to. It is what SQL computes
+unaided, since `NULL + 1` is `NULL`, so no model needs a special case. And **the count is rows the
+change was applied to**, not rows whose value came out different: `add(0)` is the identity on a value
+and still a change applied to a row, and rows-applied-to is the number a compiling model can report
+without reading values back to compare them.
+
 ### What the conformance suite caught
 
 The first version of the grouped SQL folded straight over the join. It was wrong, and nothing about
@@ -232,6 +288,30 @@ being an effect and becomes what it always was — a named query, i.e. an arrow 
 reused. Application verbs remain available for things that genuinely are effects (send mail, charge a
 card); they just stop being how you reach your own data.
 
+**That shape is what got built, `Delta` included.** The code shipped three of these four first —
+`Select`, `Insert`, `Delete`, with the scope of section 4 as a tag of its own — and `Update` arrived
+last, long after, which makes it worth saying that the proposal is not being ticked off but
+vindicated. The row that reads
+`Update(Subobject, Delta) -> Count` had already decided three things that the four-operation spelling
+of "change a value" gets wrong, and they are the three that matter:
+
+- the first argument is a **subobject**, not a key list, so the guard is part of the operation rather
+  than the result of an earlier query;
+- the second is a **`Delta`**, not a `Row`. A row is the new value; a delta is a *function of the old
+  one*. That distinction is the whole difference between an update that is safe under READ COMMITTED
+  and one that is not, and it was written down before anything depended on it;
+- the answer is a `Count`, which is what makes losing a race observable.
+
+Section 7.4 works through why a `Row` there would not have been enough. The vocabulary that
+`Delta` became is closed — `DB.add(delta)` and `DB.set(value)`, with a bare value meaning `:set` — on
+the same rule that keeps `avg` out of phase two: what is offered is what carries a law. `add` with a
+signed operand is one arrow rather than two spellings of one, so there is one thing to check, one to
+compile, and one for three models to agree about.
+
+The signature the code exports adds the scope, so it is five tags rather than four
+(`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `ATOMICALLY`) — and the fifth is the subject of the next
+section rather than a query at all.
+
 The payoff is in the next two sections, and it is the only reason to bother.
 
 ## 4. A transaction is a combinator handler, and rollback is what `Err` means to it
@@ -272,7 +352,13 @@ With a fixed signature, the interesting handlers are not stubs. What was written
 in the code, and the names are these:
 
 - `DB.sql(schema, connection)` — the hand-written model. `Select` compiles the arrow to SQL text and
-  binds, with no driver anywhere near it; the port is one method, `execute(sql, binds) -> rows`.
+  binds, with no driver anywhere near it; the mandatory port is one method,
+  `execute(sql, binds) -> rows`. A connection may *also* answer `change(sql, binds) -> Integer`, the
+  rows a statement affected — the one thing `execute` structurally cannot report. It is asked with
+  `respond_to?` rather than configured, so it is a capability a connection declares rather than a
+  requirement placed on every connection: existing adapters keep working untouched, and the gem still
+  depends on no driver. Where it is declared, a change or a deletion is one statement carrying its own
+  guard; where it is not, the count is measured over the same guard inside one scope.
 - `DB.sequel(schema, database)` — the same arrows lowered onto Sequel's expression API, which knows
   dialects, quoting, pooling, and type mapping. A backend, not a second query language.
 - `DB.memory(schema, seed)` — an instance functor `I : C → Set`, sets of rows, where `Select` is
@@ -310,6 +396,9 @@ suite rather than in a nightly job somebody stops reading.
 - **No query DSL beyond what the structure justifies.** `having` exists and is a different word from
   `where` because a grouped relation is a different set. Window functions, recursive CTEs, and
   arbitrary expressions are not offered; beyond them, declared raw SQL with a typed result.
+- **No expression language in a change.** `:set` and `:add` are the two things a change may be, and a
+  decrement is `add` of a negative delta rather than a second arrow. Widening that would be inventing
+  a small language whose laws nobody stated, in three models that would then have to agree about it.
 
 ## 7. Where the analogy breaks, said out loud
 
@@ -321,11 +410,29 @@ not reach:
    explicit. Comparisons that would silently go three-valued should be a build error, the way an
    ambiguous route is.
 2. **Ordering and `LIMIT`.** Not limits or colimits — they need a linear order. Implemented as phase
-   three, and typed as such: an ordered query returns a `Listing`, not a `Relation`.
+   three, and typed as such: an ordered query returns a `Listing`, not a `Relation`. Where the theory
+   stops short is the adjoined point: `A + 1` has an element the column's declared type does not
+   mention, phase two produces one unprompted, and nothing says where it goes. That had to be decided
+   rather than derived, and it is — `nothing` sorts after every element of `A`, in both directions —
+   because the alternative was two SQL backends disagreeing with each other about a value.
 3. **Aggregation.** `GROUP BY` is a fold along the fibers of a map `A → K`. Implemented as phase two,
    and restricted to the aggregates that are monoids, which is why `avg` is not offered.
 4. **Isolation levels.** No algebra makes `REPEATABLE READ` true. The transaction handler is sound
-   *within* an isolation level, which is a parameter and not a theorem. Say so where it is chosen.
+   *within* an isolation level, which is a parameter and not a theorem. That is still the honest
+   statement, and the update surface is where the gap stopped being abstract: it was reachable through
+   ordinary use, by ordinary code that had done nothing wrong. Changing a value with four operations
+   means `Select`, `Delete`, `Insert` inside `Atomically`, which is atomic and, under the READ
+   COMMITTED a plain `BEGIN` gets on postgres, not serialisable — two scopes read `stock = 1`, the
+   second's `Delete` blocks until the first commits, then re-evaluates its guard against a row that is
+   already gone, removes nothing, and inserts a value computed from a read taken before any of that
+   happened. The decrement is lost. **What closes the reachable part is not a stronger isolation level
+   but a smaller operation.** A change expressed as a function of the current value, guarded inside the
+   one statement that applies it, never held a value for a concurrent scope to invalidate: there is no
+   earlier read, so there is nothing to have read too early. Which is also why an `Update` taking a
+   `Row` would have bought nothing — the hazard is in where the new value came from, not in how many
+   statements carry it. The general question stays open, and stays a parameter: this removes the lost
+   update, not phantoms, not write skew, and not the need to choose a level for the workloads that
+   still need one.
 5. **`Σ_F ⊣ Δ_F ⊣ Π_F` in full.** The adjoint triple is about migration between schemas, and the
    useful half of it is built (see `docs/migrations.md`): a step is a functor and both directions are
    derived, so *reversibility is computed*. `Σ_F` is built too — `merge_tables` is the coproduct, the
