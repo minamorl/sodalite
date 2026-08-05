@@ -31,8 +31,11 @@ class DBPlanTest < Minitest::Test
       [step(:merge_tables, %i[cats dogs], :animals, :species),
        { cats: { id: :integer, name: :string }, dogs: { id: :integer, name: :string } },
        %i[cats dogs], %i[animals animals.*], %i[cats cats.* dogs dogs.*]],
+      # The presentation holds an object the step does not name, which is what
+      # makes this row say anything: a decomposition claims the fibres it makes
+      # and not `users`, which some other step made and still supplies.
       [step(:split_table, :animals, :species, { 'cats' => :cats, 'dogs' => :dogs }),
-       { animals: animals }, [:'animals.species'],
+       { users: users, animals: animals }, [:'animals.species'],
        %i[cats cats.id cats.name dogs dogs.id dogs.name], %i[animals animals.*]]
     ]
 

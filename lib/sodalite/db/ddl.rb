@@ -6,6 +6,14 @@ module Sodalite
     # compiling an arrow and carrying a functor across a database are two jobs,
     # and only one of them is a query.
     module DDL
+      # An object seen as its name and nothing else. `SQL.index_name` asks a
+      # definition for `name` and reads no other part of it, so this is enough to
+      # ask the naming rule what an object's indexes were called under the name it
+      # *had*. Reading them there is the point: spelling `index_<table>_on_<field>`
+      # a second time here would be a second name, and a drop that names the index
+      # by the wrong one is a drop that misses.
+      Named = Data.define(:name)
+
       module_function
 
       # DDL is derived from the step, not typed out beside it. A step can need
@@ -22,7 +30,7 @@ module Sodalite
         case step.kind
         when :create_table then create_table(schema.table(table))
         when :drop_table then [drop_table(table)]
-        when :rename_table then [["ALTER TABLE #{SQL.quote(table)} RENAME TO #{SQL.quote(rest[0])}", []]]
+        when :rename_table then rename_table(schema.table(rest[0]), table)
         when :merge_tables then merge_tables(schema, table, rest[0], rest[1])
         when :split_table then split_table(schema, table, rest[0], rest[1])
         else alter(step, schema, table, rest)
@@ -46,13 +54,43 @@ module Sodalite
       #
       # Exactly once, at the step that makes the object. `CREATE INDEX` here has
       # no `IF NOT EXISTS`, so a second emission against one database raises —
-      # which is why nothing but a creation emits the set.
+      # which is why only a creation emits the set, and why `rename_table`, the one
+      # other step that emits it, drops the old names before it does.
       def create_table(definition)
         [[SQL.create_table_statement(definition), []], *SQL.index_statements(definition)]
       end
 
+      # An isomorphism of objects carries the morphisms out of it, so it has to
+      # carry the indexes those morphisms asked for. SQLite and Postgres both keep
+      # an index across `RENAME TO` under the name it was created with, so the
+      # renamed object was left holding `index_posts_on_author` — a name
+      # `SQL.index_name` no longer computes for it, which means nothing can find it
+      # again and a later `create_table :posts` collides with a name it never
+      # emitted.
+      #
+      # `schema` is the presentation the step lands in, not the one it left:
+      # `migrate!` moves the model to the step's shape before carrying it and
+      # `rollback!` moves it to the shape the inverse lands in, so the renamed
+      # object is what the schema holds and the name it had is only in the step's
+      # args. Measured against both paths rather than assumed.
+      #
+      # Drop and re-create rather than rename: Postgres has `ALTER INDEX ... RENAME
+      # TO` and SQLite has nothing, and the pair that both speak is this one. The
+      # cost is honest — the index is rebuilt, which a rename would not have paid —
+      # and it is the cost of the object keeping the indexes its arrows mean.
+      def rename_table(renamed, before)
+        old = Named.new(name: before)
+        [["ALTER TABLE #{SQL.quote(before)} RENAME TO #{SQL.quote(renamed.name)}", []],
+         *renamed.foreign_keys.keys.map { |field| drop_index(SQL.index_name(old, field)) },
+         *SQL.index_statements(renamed)]
+      end
+
       def drop_table(table)
         ["DROP TABLE #{SQL.quote(table)}", []]
+      end
+
+      def drop_index(name)
+        ["DROP INDEX #{SQL.quote(name)}", []]
       end
 
       def rename_column(table, from, to)

@@ -148,13 +148,34 @@ class DBDDLStatementsTest < Minitest::Test
     assert_equal [['ALTER TABLE "posts" ADD COLUMN "body" TEXT', []]], statements
   end
 
-  # A step that does not make an object emits no index: the table it names
-  # already has them, and there is no `IF NOT EXISTS` to make a repeat harmless.
-  def test_nothing_but_a_creation_emits_an_index
-    [%i[rename_table posts writings], %i[drop_attribute posts title],
-     %i[rename_attribute posts title headline], %i[drop_table posts]].each do |args|
+  # A step that neither makes an object nor moves one emits no index: the table
+  # it names already has them, and there is no `IF NOT EXISTS` to make a repeat
+  # harmless.
+  def test_nothing_but_a_creation_or_a_rename_emits_an_index
+    [%i[drop_attribute posts title], %i[rename_attribute posts title headline],
+     %i[drop_table posts]].each do |args|
       refute(ddl(LINKED, args).any? { |sql, _binds| sql.include?('CREATE INDEX') }, args.first.to_s)
     end
+  end
+
+  # An isomorphism of objects carries the morphisms out of it, so it carries the
+  # indexes they asked for. Both backends keep an index across `RENAME TO` under
+  # the name it was created with, so the renamed object was left holding
+  # `index_posts_on_author` — which `SQL.index_name` does not compute for it, so
+  # nothing could find it again and a later `create_table :posts` collided with
+  # it. The re-emission is safe here, and only here, because the drop comes first.
+  def test_a_rename_carries_the_indexes_its_morphisms_asked_for
+    statements = ddl(LINKED, %i[rename_table posts writings])
+
+    assert_equal [['ALTER TABLE "posts" RENAME TO "writings"', []],
+                  ['DROP INDEX "index_posts_on_author"', []],
+                  ['CREATE INDEX "index_writings_on_author" ON "writings" ("author")', []]], statements
+  end
+
+  # An object with no morphisms out of it has no indexes to carry, so the rename
+  # is the one statement it always was.
+  def test_a_rename_of_an_object_with_no_morphisms_emits_no_index_at_all
+    assert_equal [['ALTER TABLE "posts" RENAME TO "writings"', []]], ddl(POSTS, %i[rename_table posts writings])
   end
 
   # A foreign key column holds the target's key, so its type is the target's key
@@ -331,13 +352,12 @@ class DBDDLStatementsRunTest < Minitest::Test
     assert_equal carried.memory.select(query), carried.sequel.select(query)
   end
 
-  # The step is carried directly rather than through a `History`, because a
-  # history that contains `split_table` beside any other object cannot be
-  # planned: `Step#provides` answers for the whole resulting presentation, so
-  # the split and the step that made the other object both claim its name and
-  # the solver reads a cycle. A fibre only has a morphism out of it if there is
-  # another object to point at, so the two cannot be had together — a
-  # limitation of `migration.rb`, not of the statements under test.
+  # The step is carried directly rather than through a `History` because what is
+  # under test is what one step emits, and the presentation it needs — a fibre
+  # with a morphism out of it, so another object to point at — is reached in one
+  # line by declaring it. A history holding both is plannable now that a split
+  # claims its fibres and nothing else; `db_split_planability_test.rb` is where
+  # that claim is made, and this file stays about the statements.
   def test_every_fibre_of_the_decomposition_arrives_indexed_and_keeps_its_elements
     step = Sodalite::DB::Step[:split_table, :animals, :species, { 'cats' => :cats, 'dogs' => :dogs }]
     after = Sodalite::DB::Schema.new(step.apply(FLOCK))
