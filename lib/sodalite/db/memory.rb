@@ -59,6 +59,15 @@ module Sodalite
       # --- the functor laws, checkable ---------------------------------------
       # A dangling foreign key is not a bad row. It is a failure to be a functor:
       # the morphism `posts -> users` has no value at that element.
+      #
+      # This is a **diagnostic, not an invariant**, and that is the decision
+      # rather than an omission. `insert` does not check that the target of a
+      # foreign key exists, `delete` does not check that nothing points at the
+      # row it removes, and the DDL emits no `REFERENCES`. So an instance can
+      # stop being a functor between two writes, and this is what says so, when
+      # the caller asks. Guarding the writes instead would impose a constraint
+      # the schema does not declare, and would turn something an instance *is*
+      # into something a model enforces on its behalf.
       def functor?
         violations.empty?
       end
@@ -69,10 +78,13 @@ module Sodalite
         end
       end
 
+      # The sentence belongs to the schema, not to the model: three models report
+      # the same broken morphism, and three copies of the wording would drift
+      # while all three still claimed to be checking one law.
       def dangling(table, field, target)
         keys = keys_of(target)
         @store[table.name].reject { |row| keys.include?(row[field]) }
-                          .map { |row| "#{table.name}.#{field}=#{row[field].inspect} has no #{target}" }
+                          .map { |row| @schema.dangling_message(table.name, field, row[field], target) }
       end
 
       def keys_of(target)
@@ -105,14 +117,26 @@ module Sodalite
         rows
       end
 
+      # Phase one is a walk, and the carrier walks with it: composition moves it
+      # to the codomain, and a pullback's path starts wherever it currently
+      # stands. Nothing in a step records that on its own, so it is carried.
       def phase_one(query)
         rows = @store.fetch(query.root).map(&:dup)
-        query.steps.each { |step| rows = apply(step, rows) }
+        carrier = query.root
+        query.steps.each do |step|
+          rows = apply(step, rows, carrier)
+          carrier = carrier_after(step, carrier)
+        end
         rows
       end
 
       # A fold along the fibers of the grouping map: partition, then reduce each
-      # fibre into its monoid.
+      # fibre into its monoid — `Aggregate#fold`, which is also where the `A + 1`
+      # of a nullable column is eliminated, so nothing here re-derives it.
+      #
+      # The merge cannot lose a column: a fold named after a grouping key, or
+      # after a fold already taken, is refused when the arrow is built, so there
+      # is no key for it to overwrite.
       def fold(query, rows)
         rows.group_by { |row| row.slice(*query.grouping) }
             .map { |key, fibre| key.merge(query.aggregates.to_h { |agg| [agg.name, agg.fold(fibre)] }) }
@@ -149,7 +173,18 @@ module Sodalite
         record[table.key]
       end
 
-      def delete(query)
+      # `deletable!` comes first because everything it refuses would otherwise be
+      # answered instead of refused. A projection selects tuples, and a tuple is
+      # equal to no row of the carrier, so the rejection below would match
+      # nothing and the caller would be told that zero rows went — an answer
+      # shaped exactly like a fact.
+      #
+      # With it in front, only whole rows of the carrier can reach the rejection,
+      # so full-row equality here is equality of elements of the very set
+      # `select` returned, and the count is measured on the store: how many
+      # elements actually left, not how many the arrow named.
+      def delete(query, confirm_carrier: nil)
+        query.deletable!(confirm_carrier: confirm_carrier)
         doomed = select(query).rows.to_set
         table = @schema.table(query.carrier)
         before = @store[table.name].size
