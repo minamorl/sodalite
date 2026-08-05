@@ -159,7 +159,24 @@ class DBConformanceTest < Minitest::Test
 
     # A window with no upper bound. Every dialect spells "no limit" differently
     # and the models have to land on the same rows regardless.
-    'an offset with no limit' => ->(s) { s[:users].order(:name).offset(1) }
+    'an offset with no limit' => ->(s) { s[:users].order(:name).offset(1) },
+
+    # A fold over `A + 1`. `nickname` is a map into it, so the `nothing`s are
+    # eliminated before the monoid sees them, and the fibres of `city` are the
+    # two shapes that elimination reads differently: tokyo mixes a value with a
+    # nothing, osaka is nothing the whole way down. `sum` needs a nullable
+    # *numeric* column, which this presentation cannot say, so it is folded in
+    # `db_conformance_edges_test.rb` over one that can.
+    'a fold over a nullable column' => ->(s) { s[:users].group(:city).min(:nickname, as: :handle) },
+    'a fold over a fibre that is entirely nothing' => lambda { |s|
+      s[:users].where(:city, 'osaka').group(:city).max(:nickname, as: :handle)
+    },
+    'two folds over a nullable column at once' => lambda { |s|
+      s[:users].group(:city).count(:people).min(:nickname, as: :first_handle).max(:nickname, as: :last_handle)
+    },
+    'a nullable column eliminated before the fold' => lambda { |s|
+      s[:users].where_present(:nickname).group(:city).min(:nickname, as: :handle)
+    }
   }.freeze
 
   def setup
