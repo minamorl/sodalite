@@ -3,6 +3,7 @@
 # `sodalite/db` is an optional layer on the core, and says so by requiring it.
 require_relative '../sodalite'
 
+require_relative 'db/address'
 require_relative 'db/aggregate'
 require_relative 'db/schema'
 require_relative 'db/migration'
