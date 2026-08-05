@@ -288,7 +288,7 @@ class DBSequelRenameIndexTest < Minitest::Test
   RENAMED = Sodalite::DB.history(
     [:create_table, :users, { id: :integer, name: :string }],
     [:create_table, :posts, { id: :integer, title: :string, author: Sodalite::DB.fk(:users) }],
-    [:rename_table, :posts, :writings]
+    %i[rename_table posts writings]
   )
 
   def setup
