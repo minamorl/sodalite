@@ -24,13 +24,23 @@ module Sodalite
     #
     # Sequel stays out of the runtime dependencies: this takes a `Sequel::Database`
     # someone else built, the same way `DB::Sql` takes anything with `execute`.
-    class Sequel
+    class Sequel # rubocop:disable Metrics/ClassLength
       include SequelDDL
       include SequelArrows
       include Ledger
 
       LEDGER = :sodalite_migrations
       MIGRATION_LOCK = :sodalite_migration_lock
+
+      # Sequel answers whether DDL survives a rollback for itself, which is the
+      # whole point of lowering onto a backend that knows dialects — but its
+      # answer is a *lower* bound. `supports_transactional_ddl?` is `false` by
+      # default and only mssql, postgres, and derby override it, so sqlite —
+      # which has had transactional DDL for as long as it has had transactions —
+      # reports that it has none (measured against sequel 5.107, not assumed).
+      # Believing that default would refuse every sqlite migration, so where
+      # Sequel is silent the adapter's own name is consulted.
+      TRANSACTIONAL_DDL_ADAPTERS = %i[sqlite].freeze
 
       attr_reader :schema
 
@@ -39,7 +49,13 @@ module Sodalite
         @db = database
       end
 
-      def create_tables!
+      # The whole schema in one shot, with **no ledger behind it** — which is
+      # what the name says and why it says it. `verify!` reads the ledger and
+      # nothing else, so a database built this way is refused at boot with
+      # "database is missing required migrations". Anything that boots against
+      # `verify!` goes through `migrate!` instead; this is for a suite that
+      # wants a shape and has no history to get it from.
+      def create_tables_for_test!
         @schema.tables.each_value { |table| create_table(table) }
         self
       end
@@ -159,13 +175,54 @@ module Sodalite
         nil
       end
 
-      def claim_lock(token)
+      def transactional_ddl?
+        @db.supports_transactional_ddl? || TRANSACTIONAL_DDL_ADAPTERS.include?(@db.adapter_scheme)
+      end
+
+      # `Sequel::Database#transaction` already joins an outer transaction rather
+      # than opening a second, so composing with `atomically` costs nothing
+      # here, and a raise inside unwinds it. What it does not do is unwind on a
+      # result, which is right: a migration block has no result to speak of.
+      def migration_scope
+        result = nil
+        @db.transaction { result = yield }
+        result
+      end
+
+      # Two readings, taken before anything is carried. The sentences are
+      # `Preflight`'s, so this model and the other two refuse a step in one
+      # wording rather than three.
+      def preflight_violations(step)
+        table, *rest = step.args
+        case step.kind
+        when :split_table then unlisted_tags(table, rest[0], rest[1], distinct_values(table, rest[0]))
+        when :merge_tables then colliding_keys(key_of(rest[0]), key_holders(table, rest[0]))
+        else []
+        end
+      end
+
+      # The insert is the claim, and `id` is a primary key, so two runners
+      # racing here are settled by the database. Sequel maps the driver's
+      # uniqueness error onto a class of its own, so the lost race is caught by
+      # name — which the `Sql` model cannot do, because its port is
+      # `execute(sql, binds) -> rows` and the error class is whatever the driver
+      # chose. The row still decides, for the same reason it decides there:
+      # whoever's token is in it won.
+      def claim_lock(token) # rubocop:disable Naming/PredicateMethod
         ensure_lock!
-        # Sequel, rather than handwritten SQL, owns the backend's dialect here.
-        @db[MIGRATION_LOCK].insert(id: 1, token: token)
-        true
-      rescue ::Sequel::UniqueConstraintViolation
-        false
+        begin
+          @db[MIGRATION_LOCK].insert(id: 1, token: token, holder: lock_holder,
+                                     acquired_at: lock_acquired_at)
+        rescue ::Sequel::UniqueConstraintViolation
+          nil
+        end
+        read_lock&.fetch(:token) == token
+      end
+
+      def read_lock
+        ensure_lock!
+        held = @db[MIGRATION_LOCK].where(id: 1).first
+        held && { token: held[:token], holder: held[:holder], acquired_at: held[:acquired_at] }
       end
 
       def release_lock(token)
@@ -176,6 +233,24 @@ module Sodalite
 
       private
 
+      def distinct_values(table, field)
+        @db[table].distinct.select_map(field)
+      end
+
+      def key_holders(sources, into)
+        key = key_of(into)
+        sources.each_with_object(Hash.new { |all, value| all[value] = [] }) do |source, holders|
+          @db[source].select_map(key).each { |value| holders[value] << source }
+        end
+      end
+
+      # The sources of a coproduct share a shape, so they share the key the
+      # target has — and the target is the one of them the schema still knows
+      # about once the step has been applied to the presentation.
+      def key_of(into)
+        @schema.table(into).key
+      end
+
       def ensure_ledger!
         return if @db.table_exists?(LEDGER)
 
@@ -185,14 +260,22 @@ module Sodalite
         end
       end
 
+      # A table an older version of this file created has neither `holder` nor
+      # `acquired_at`, and is left alone rather than widened. Sequel reads the
+      # row by name, so both come back `nil` and the lock reads as one of
+      # unknown age — which `steal_lock!` is allowed to clear. The hand-written
+      # model names its columns in one `SELECT` and is less forgiving; it says
+      # so next door.
       def ensure_lock!
         return if @db.table_exists?(MIGRATION_LOCK)
 
         @db.create_table(MIGRATION_LOCK) do
           Integer :id, primary_key: true
           String :token
+          String :holder
+          String :acquired_at
         end
       end
-    end
+    end # rubocop:enable Metrics/ClassLength
   end
 end

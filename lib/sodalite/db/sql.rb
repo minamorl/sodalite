@@ -44,9 +44,8 @@ module Sodalite
       # what the schema is allowed to say.
       #
       # ANSI double quotes: SQLite and Postgres both read them as an identifier,
-      # MySQL only under `ANSI_QUOTES` — the same dialect caveat `Sql#claim_lock`
-      # carries about `FROM DUAL`. An embedded quote is doubled, which is how the
-      # standard escapes one.
+      # MySQL only under `ANSI_QUOTES`. An embedded quote is doubled, which is
+      # how the standard escapes one.
       def quote(identifier)
         %("#{identifier.to_s.gsub('"', '""')}")
       end
@@ -267,16 +266,30 @@ module Sodalite
 
       attr_reader :schema
 
-      def initialize(schema, connection)
+      # Whether DDL survives a rollback is a property of the database, and the
+      # port cannot ask: `execute(sql, binds) -> rows` has nowhere to put the
+      # question. So the caller answers it once, where the connection is built.
+      # `true` is the default because SQLite and Postgres both have it; a model
+      # over MySQL says `transactional_ddl: false` and is refused a migration
+      # rather than left to half-apply one.
+      def initialize(schema, connection, transactional_ddl: true)
         @schema = schema.is_a?(History) ? schema.schema : schema
         @connection = connection
         @history = schema if schema.is_a?(History)
+        @transactional_ddl = transactional_ddl
       end
 
+      # The whole schema in one shot, with **no ledger behind it** — which is
+      # what the name says and why it says it. `verify!` reads the ledger and
+      # nothing else, so a database built this way is refused at boot with
+      # "database is missing required migrations". Anything that boots against
+      # `verify!` goes through `migrate!` instead; this is for a suite that
+      # wants a shape and has no history to get it from.
+      #
       # The indexes are created with the table because the morphisms are declared
       # with it: a join over an unindexed foreign key is the schema's own shape
       # being paid for again at every read.
-      def create_tables!
+      def create_tables_for_test!
         @schema.tables.each_value do |table|
           @connection.execute(SQL.create_table_statement(table), [])
           SQL.index_statements(table).each { |sql, binds| @connection.execute(sql, binds) }
@@ -364,6 +377,12 @@ module Sodalite
       LEDGER = 'sodalite_migrations'
       MIGRATION_LOCK = 'sodalite_migration_lock'
 
+      # Everything on the lock row except the `id` that makes it a single row.
+      # One list, because the insert and the read have to name the same columns
+      # in the same order for the positional rows the port answers with to mean
+      # anything.
+      LOCK_COLUMNS = %i[token holder acquired_at].freeze
+
       def read_ledger
         ensure_ledger!
         columns = "#{SQL.quote(:fingerprint)}, #{SQL.quote(:step)}"
@@ -390,15 +409,63 @@ module Sodalite
         nil
       end
 
+      def transactional_ddl? = @transactional_ddl
+
+      # A migration step's scope. Same depth counter `atomically` uses, so a
+      # migration run from inside a scope joins that scope rather than asking
+      # the driver for a second `BEGIN` it has no answer for.
+      #
+      # What differs from `atomically` is what unwinds it. There, rollback is
+      # what an `Err` *result* means; a migration block has no result to speak
+      # of — `record_step` answers `nil` — so the only thing that can end this
+      # scope early is a raise, and a raise ends it.
+      def migration_scope
+        @depth = (@depth || 0) + 1
+        outermost = @depth == 1
+        @connection.execute('BEGIN', []) if outermost
+        result = yield
+        @connection.execute('COMMIT', []) if outermost
+        result
+      rescue StandardError
+        @connection.execute('ROLLBACK', []) if outermost
+        raise
+      ensure
+        @depth -= 1
+      end
+
+      # Two readings, taken before anything is carried. The sentences are
+      # `Preflight`'s, so this model and the other two refuse a step in one
+      # wording rather than three.
+      def preflight_violations(step)
+        table, *rest = step.args
+        case step.kind
+        when :split_table then unlisted_tags(table, rest[0], rest[1], distinct_values(table, rest[0]))
+        when :merge_tables then colliding_keys(key_of(rest[0]), key_holders(table, rest[0]))
+        else []
+        end
+      end
+
+      # The row is `id = 1` and the table's primary key is what makes it one, so
+      # two runners racing here are settled by the database rather than by a
+      # `WHERE NOT EXISTS` both of them can pass. The loser's insert fails.
+      #
+      # The rescue is deliberately broad, and this is the one place that is
+      # right: the port is `execute(sql, binds) -> rows`, so the uniqueness
+      # error arrives as whatever class the driver chose — sqlite3, pg, and a
+      # fake each raise something different, and none of them is nameable from
+      # here without depending on a driver the gem does not depend on. So the
+      # exception is not the answer. The row is: whoever's token is in it won,
+      # and that is a fact the port *can* read.
       def claim_lock(token) # rubocop:disable Naming/PredicateMethod
         ensure_lock!
-        lock = SQL.quote(MIGRATION_LOCK)
-        id = SQL.quote(:id)
-        # This spelling targets SQLite/Postgres; MySQL requires `FROM DUAL`, and
-        # reads the quotes above as strings unless `ANSI_QUOTES` is set.
-        @connection.execute("INSERT INTO #{lock} (#{id}, #{SQL.quote(:token)}) SELECT 1, ? " \
-                            "WHERE NOT EXISTS (SELECT 1 FROM #{lock})", [token])
-        @connection.execute("SELECT #{SQL.quote(:token)} FROM #{lock} WHERE #{id} = 1", []).dig(0, 0) == token
+        insert_lock(token)
+        lock_row&.first == token
+      end
+
+      def read_lock
+        ensure_lock!
+        row = lock_row
+        row && { token: row[0], holder: row[1], acquired_at: row[2] }
       end
 
       def release_lock(token)
@@ -409,6 +476,39 @@ module Sodalite
       end
 
       private
+
+      def insert_lock(token)
+        columns = LOCK_COLUMNS.map { |column| SQL.quote(column) }.join(', ')
+        @connection.execute("INSERT INTO #{SQL.quote(MIGRATION_LOCK)} (#{SQL.quote(:id)}, #{columns}) " \
+                            'VALUES (1, ?, ?, ?)', [token, lock_holder, lock_acquired_at])
+      rescue StandardError
+        nil
+      end
+
+      def lock_row
+        columns = LOCK_COLUMNS.map { |column| SQL.quote(column) }.join(', ')
+        @connection.execute("SELECT #{columns} FROM #{SQL.quote(MIGRATION_LOCK)} " \
+                            "WHERE #{SQL.quote(:id)} = 1", []).first
+      end
+
+      def distinct_values(table, field)
+        @connection.execute("SELECT DISTINCT #{SQL.quote(field)} FROM #{SQL.quote(table)}", []).map(&:first)
+      end
+
+      def key_holders(sources, into)
+        key = SQL.quote(key_of(into))
+        sources.each_with_object(Hash.new { |all, value| all[value] = [] }) do |source, holders|
+          @connection.execute("SELECT #{key} FROM #{SQL.quote(source)}", [])
+                     .each { |row| holders[row.first] << source }
+        end
+      end
+
+      # The sources of a coproduct share a shape, so they share the key the
+      # target has — and the target is the one of them the schema still knows
+      # about once the step has been applied to the presentation.
+      def key_of(into)
+        @schema.table(into).key
+      end
 
       # The keys are named twice — once to remove them, once to count what is
       # left of them — and the second reading is the measurement, so it has to
@@ -424,9 +524,17 @@ module Sodalite
                             "(#{SQL.quote(:fingerprint)} TEXT PRIMARY KEY, #{SQL.quote(:step)} TEXT)", [])
       end
 
+      # `IF NOT EXISTS` leaves a table an older version of this file created
+      # alone, and that one has neither `holder` nor `acquired_at` — so the
+      # first claim against it fails on the missing column rather than quietly
+      # working. That is the honest failure and the recovery is one statement:
+      # the lock table holds nothing between migrations, so drop it and let this
+      # build it again. Widening it in place would be a migration of the
+      # migration table, and this change does not write one.
       def ensure_lock!
-        @connection.execute("CREATE TABLE IF NOT EXISTS #{SQL.quote(MIGRATION_LOCK)} " \
-                            "(#{SQL.quote(:id)} INTEGER PRIMARY KEY, #{SQL.quote(:token)} TEXT)", [])
+        columns = "#{SQL.quote(:id)} INTEGER PRIMARY KEY, " \
+                  "#{LOCK_COLUMNS.map { |column| "#{SQL.quote(column)} TEXT" }.join(', ')}"
+        @connection.execute("CREATE TABLE IF NOT EXISTS #{SQL.quote(MIGRATION_LOCK)} (#{columns})", [])
       end
 
       public

@@ -166,8 +166,8 @@ class DBConformanceTest < Minitest::Test
     skip 'sqlite3 unavailable' unless SQLITE
 
     @memory = Sodalite::DB.memory(SCHEMA, SEED)
-    @sql = Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables!
-    @sequel = Sodalite::DB.sequel(SCHEMA, Sequel.sqlite).create_tables!
+    @sql = Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables_for_test!
+    @sequel = Sodalite::DB.sequel(SCHEMA, Sequel.sqlite).create_tables_for_test!
     SEED.each do |table, rows|
       rows.each { |row| [@sql, @sequel].each { |model| model.insert(table, row) } }
     end

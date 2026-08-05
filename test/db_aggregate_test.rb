@@ -111,7 +111,7 @@ class DBAggregateTest < Minitest::Test
   def test_the_sql_model_agrees_with_the_monoid_about_an_all_nothing_fibre
     skip 'sqlite3 unavailable' unless SQLITE
 
-    model = Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables!
+    model = Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables_for_test!
     SEED[:users].each { |row| model.insert(:users, row) }
     query = SCHEMA[:users].group(:city).sum(:score, as: :total).min(:score, as: :lowest)
 

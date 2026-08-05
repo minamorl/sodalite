@@ -189,8 +189,8 @@ class DBMigrationConformanceTest < Minitest::Test
   # dialect wants, and that is a backend's job rather than a compiler's.
   def test_both_backends_quote_a_reserved_word_the_same_way
     reserved = Sodalite::DB.schema(order: { id: :integer, select: :string })
-    sequel = Sodalite::DB.sequel(reserved, Sequel.sqlite).create_tables!
-    sql = Sodalite::DB.sql(reserved, Adapter.new).create_tables!
+    sequel = Sodalite::DB.sequel(reserved, Sequel.sqlite).create_tables_for_test!
+    sql = Sodalite::DB.sql(reserved, Adapter.new).create_tables_for_test!
     [sequel, sql].each { |model| model.insert(:order, { id: 1, select: 'x' }) }
     query = reserved[:order].where(:select, 'x')
 
@@ -204,7 +204,7 @@ class DBMigrationConformanceTest < Minitest::Test
   # says the new truth rather than being deleted along with it.
   def test_a_reserved_table_name_no_longer_breaks_the_hand_written_backend
     reserved = Sodalite::DB.schema(order: { id: :integer, select: :string })
-    sql = Sodalite::DB.sql(reserved, Adapter.new).create_tables!
+    sql = Sodalite::DB.sql(reserved, Adapter.new).create_tables_for_test!
     sql.insert(:order, { id: 1, select: 'x' })
 
     assert_equal [{ id: 1, select: 'x' }], sql.select(reserved[:order]).rows

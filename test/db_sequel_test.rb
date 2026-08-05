@@ -51,7 +51,7 @@ class DBSequelTest < Minitest::Test
     skip 'sqlite3 unavailable' unless SEQUEL_MODEL_SQLITE
 
     @db = Sequel.sqlite
-    @model = Sodalite::DB.sequel(SCHEMA, @db).create_tables!
+    @model = Sodalite::DB.sequel(SCHEMA, @db).create_tables_for_test!
     SEED.each { |table, rows| rows.each { |row| @model.insert(table, row) } }
   end
 
