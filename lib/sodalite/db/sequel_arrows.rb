@@ -19,16 +19,22 @@ module Sodalite
         query.unions.reduce(phase_one(query)) { |rows, other| rows.union(phase_one(other)) }
       end
 
+      # `DISTINCT` is how SQL spells image factorization, and it is applied when
+      # there is an image left to take. `Query#distinct?` is the one place that
+      # decides, because three models each deciding it for themselves is three
+      # chances to decide it differently.
       def phase_one(query)
         aliases = [[query.root, :t0]]
         rows = @db[::Sequel[query.root].as(:t0)]
         query.steps.each { |kind, *rest| rows = step(rows, aliases, kind, rest, query) }
-        rows.distinct.select(*fields_of(query, aliases.last[1]))
+        rows = rows.distinct if query.distinct?
+        rows.select(*fields_of(query, aliases.last[1]))
       end
 
       def step(rows, aliases, kind, rest, query)
         case kind
         when :follow then follow(rows, aliases, rest, query)
+        when :pullback then pullback(rows, aliases, rest, query)
         when :where then rows.where(condition(aliases.last[1], rest))
         when :null then if rest[1]
                           rows.where(column(aliases.last[1],
@@ -49,6 +55,27 @@ module Sodalite
         key = query.schema.table(target).key
         aliases << [target, next_alias]
         rows.join(::Sequel[target].as(next_alias), key => column(source, fk))
+      end
+
+      # The pullback: `f*(S)` is a subobject of the *carrier*, so this emits the
+      # join a composition emits and differs only in which side of the span the
+      # rows are read from. The path's aliases are pushed exactly as `follow`
+      # pushes them — a path of length > 1 is a chain of joins — and then the
+      # carrier's is pushed back on top, because `aliases.last` is what every later
+      # step and the projection qualify against, and a pullback does not move it.
+      #
+      # The comparison goes through the same `condition` a `where` goes through, so
+      # the operators cannot mean one thing along a path and another at the
+      # carrier.
+      def pullback(rows, aliases, rest, query)
+        paths, *comparison = rest
+        carrier = aliases.last
+        joined = paths.reduce(rows) do |dataset, fk|
+          follow(dataset, aliases, [fk, query.schema.target_of(aliases.last[0], fk)], query)
+        end
+        target = aliases.last[1]
+        aliases << carrier
+        joined.where(condition(target, comparison))
       end
 
       def condition(table_alias, step)
@@ -75,12 +102,20 @@ module Sodalite
         query.havings.reduce(grouped) { |dataset, having| dataset.having(condition(nil, having)) }
       end
 
+      # The same fold `Aggregate` spells as text, spelled as an expression. It has
+      # to mean the same thing, and for `sum` that costs a `COALESCE`: SQL answers
+      # `NULL` for a fibre whose column is entirely nothing, while the monoid's
+      # identity is `0`. The monoid is the pinned meaning and the backend is
+      # brought to it — so the identity comes from the monoid rather than being
+      # typed out again here. `min`/`max` need no repair, because `NULL` is the
+      # identity they already adjoined, and `COUNT(*)` never answers it.
       def aggregate_of(aggregate)
         function = if aggregate.field
                      ::Sequel.function(aggregate.kind, column(:g, aggregate.field))
                    else
                      ::Sequel.function(:count).*
                    end
+        function = ::Sequel.function(:coalesce, function, aggregate.monoid.identity) if aggregate.kind == :sum
         function.as(aggregate.name)
       end
 
