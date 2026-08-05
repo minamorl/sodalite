@@ -70,6 +70,14 @@ module Sodalite
         doomed.size
       end
 
+      def update(query, delta)
+        changes = query.update_delta(delta)
+        doomed = select(query)
+        table = @schema.table(query.carrier)
+        @db[table.name].where(table.key => doomed.rows.map { |row| row[table.key] }).update(changes)
+        doomed.size
+      end
+
       # Same contract as the other two: the caller never asks for a rollback, it
       # is what `Err` means to the scope. `Sequel::Rollback` is how Sequel spells
       # "unwind without raising past me".

@@ -193,6 +193,18 @@ module Sodalite
         doomed.size
       end
 
+      def update(query, delta)
+        changes = query.update_delta(delta)
+        doomed = select(query)
+        table = @schema.table(query.carrier)
+        assignments = changes.keys.map { |field| "#{field} = ?" }.join(', ')
+        doomed.rows.each do |row|
+          @connection.execute("UPDATE #{table.name} SET #{assignments} WHERE #{table.key} = ?",
+                              changes.values + [row[table.key]])
+        end
+        doomed.size
+      end
+
       # --- migration ----------------------------------------------------------
       LEDGER = 'sodalite_migrations'
       MIGRATION_LOCK = 'sodalite_migration_lock'

@@ -157,6 +157,17 @@ class DBQueryBuildTest < Minitest::Test
 
     assert_raises(Sodalite::DB::QueryError) { relation.typed }
   end
+
+  def test_update_refuses_identity_morphisms_and_composition
+    model = Sodalite::DB.memory(SCHEMA, users: [{ id: 1, name: 'mina', city: 'tokyo' }],
+                                        posts: [{ id: 10, title: 'hi', author: 1 }])
+
+    assert_raises(Sodalite::DB::QueryError) { model.update(SCHEMA[:users], id: 2) }
+    assert_raises(Sodalite::DB::QueryError) { model.update(SCHEMA[:posts], author: 1) }
+    assert_raises(Sodalite::DB::QueryError) do
+      model.update(SCHEMA[:posts].follow(:author), name: 'renamed')
+    end
+  end
 end
 
 # A transaction is a combinator handler, and rollback is what `Err` means to it.
@@ -221,6 +232,12 @@ class DBRouteTest < Minitest::Test
     lay[:response].set(Sodalite.ok({ names: found.map { |row| row[:name] }.sort }))
   end
 
+  RENAME = Berylx::Task[:rename] do |lay, io|
+    count = io.perform(Sodalite::DB::UPDATE,
+                       [SCHEMA[:users].where(:id, lay[:request].get.params.id), { name: lay[:request].get.body.name }])
+    lay[:response].set(Sodalite.ok({ updated: count }))
+  end
+
   def route
     Sodalite::Route[:get, '/cities/:city/users',
                     params: { city: :string },
@@ -250,5 +267,18 @@ class DBRouteTest < Minitest::Test
 
     assert_equal 2, seeded.select(in_tokyo).size
     assert_equal 1, seeded.select(in_tokyo.where(:name, 'mina')).size
+  end
+
+  def test_a_route_can_perform_update_through_the_relational_signature
+    update_route = Sodalite::Route[:patch, '/users/:id',
+                                   params: { id: :integer }, body: { name: :string },
+                                   responses: { 200 => { updated: :integer } }, run: RENAME]
+    model = seeded
+    app = Sodalite::App.new(routes: [update_route], handlers: Sodalite::DB.handlers(model))
+
+    triple = app.call(env(:patch, '/users/1', body: JSON.generate(name: 'new')))
+
+    assert_equal({ 'updated' => 1 }, json_body(triple))
+    assert_equal 'new', model.select(SCHEMA[:users].where(:id, 1)).rows.first[:name]
   end
 end

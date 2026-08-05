@@ -6,7 +6,40 @@ module Sodalite
     # that fails on the one request that happens to exercise it is a query that
     # fails at 3am, so none of these wait until evaluation.
     module QueryChecks
+      def update_delta(delta)
+        table = schema.table(carrier)
+        normalized = normalize_delta(delta)
+        check_delta_fields!(table, normalized)
+        check_update_subobject!
+        validate_delta!(table, normalized)
+        normalized.freeze
+      end
+
       private
+
+      def normalize_delta(delta)
+        normalized = delta.to_h { |field, value| [field.to_sym, value] }
+        raise QueryError, 'update needs at least one attribute' if normalized.empty?
+
+        normalized
+      end
+
+      def check_delta_fields!(table, delta)
+        delta.each_key do |field|
+          raise SchemaError, "#{carrier} has no field #{field.inspect}" unless table.field?(field)
+        end
+        # Keys identify elements and foreign keys are schema morphisms, so neither is an attribute update.
+        forbidden = delta.keys & ([table.key] + table.foreign_keys.keys)
+        return if forbidden.empty?
+
+        raise QueryError, "update cannot change key or foreign key fields: #{forbidden.inspect}"
+      end
+
+      def validate_delta!(table, delta)
+        spec = delta.keys.to_h { |field| [field, table.attributes.fetch(field)] }
+        typed = Zeolite.schema(spec).load(delta.to_h { |field, value| [field.to_s, value] })
+        raise SchemaError, "#{carrier}: #{typed.violations.join('; ')}" unless typed.ok?
+      end
 
       def check_field!(field)
         return if schema.table(carrier).field?(field)
@@ -79,6 +112,17 @@ module Sodalite
         return unless united?
 
         raise QueryError, "#{operation} cannot follow union — the coproduct is not an object of the schema"
+      end
+
+      # Update acts on a subobject of one stored carrier; images, composites,
+      # folds, and presentations do not identify an unambiguous stored domain.
+      def check_update_subobject!
+        regular_steps = steps.all? { |kind, *| %i[where null].include?(kind) }
+        invalid = [root != carrier, !regular_steps, united?, grouped?, ordered?,
+                   !limit_rows.nil?, !offset_rows.nil?]
+        return unless invalid.any?
+
+        raise QueryError, 'update needs an unprojected subobject of one carrier'
       end
 
       def nullable?(field)
