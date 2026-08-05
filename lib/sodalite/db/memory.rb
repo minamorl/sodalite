@@ -151,6 +151,20 @@ module Sodalite
         before - @store[table.name].size
       end
 
+      def update(query, delta)
+        changes = query.update_delta(delta)
+        selected = select(query).rows.to_set
+        table = @schema.table(query.carrier)
+        changed = 0
+        @store[table.name].each do |row|
+          next unless selected.include?(row)
+
+          row.merge!(changes)
+          changed += 1
+        end
+        changed
+      end
+
       # --- transactions -------------------------------------------------------
       # A snapshot is enough here because the store is plain data. Rollback is
       # not an operation the caller asks for; it is what `Err` means to this

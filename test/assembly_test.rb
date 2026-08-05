@@ -25,6 +25,7 @@ class AssemblyTest < Minitest::Test
     _db, _objects, handlers = assembled(effects: { send_mail: ->(to) { to } })
 
     assert handlers.key?(Sodalite::DB::SELECT)
+    assert handlers.key?(Sodalite::DB::UPDATE)
     assert handlers.key?(Sodalite::Store::PUT)
     assert handlers.key?(:send_mail)
     assert handlers.key?(Sodalite::Effects::CLOCK)

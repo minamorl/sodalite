@@ -30,10 +30,11 @@ module Sodalite
   #
   #   SELECT(query)        -> Relation
   #   INSERT(table, row)   -> key
+  #   UPDATE(query, delta) -> count
   #   DELETE(query)        -> count
   #   ATOMICALLY(subtree)  -> Berylx::Ok / Berylx::Err
   #
-  # A handler map for those four is a **model of the relational theory over the
+  # A handler map for those five is a **model of the relational theory over the
   # schema**. `find_user` stops being an effect and goes back to being what it
   # always was: a named arrow, built once and reused. Application verbs remain
   # for the things that really are effects — send mail, charge a card — they just
@@ -44,10 +45,11 @@ module Sodalite
   module DB
     SELECT = :sodalite_db_select
     INSERT = :sodalite_db_insert
+    UPDATE = :sodalite_db_update
     DELETE = :sodalite_db_delete
     ATOMICALLY = :sodalite_db_atomically
 
-    TAGS = [SELECT, INSERT, DELETE, ATOMICALLY].freeze
+    TAGS = [SELECT, INSERT, UPDATE, DELETE, ATOMICALLY].freeze
 
     module_function
 
@@ -100,17 +102,18 @@ module Sodalite
     # its snapshot or its `BEGIN` is what the scope is — so it rebuilds the same
     # map and runs the subtree under it.
     Capability = Data.define(:model) do
-      def effects(rebuild)
+      def effects(rebuild) # rubocop:disable Metrics/AbcSize
         {
           SELECT => ->(query) { model.select(query) },
           INSERT => ->(payload) { model.insert(payload[0], payload[1]) },
+          UPDATE => ->(payload) { model.update(payload[0], payload[1]) },
           DELETE => ->(query) { model.delete(query) },
           ATOMICALLY => lambda { |payload|
             node, focus = payload
             model.atomically { Berylx::EffectTree.run(node, focus, handlers: rebuild.call({})) }
           }
         }
-      end
+      end # rubocop:enable Metrics/AbcSize
     end
 
     # Given the history the application was written against, the model is asked

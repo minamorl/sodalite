@@ -204,6 +204,24 @@ class DBConformanceTest < Minitest::Test
     end
   end
 
+  def test_every_model_updates_the_same_subobject_and_returns_the_same_count
+    [@memory, @sql, @sequel].each do |model|
+      count = model.update(SCHEMA[:users].where(:city, 'tokyo'), name: 'updated')
+
+      assert_equal 2, count, model.class.name
+      assert_equal(%w[updated updated], model.select(SCHEMA[:users].where(:city, 'tokyo')).map { |row| row[:name] })
+      assert_equal(['rin'], model.select(SCHEMA[:users].where(:city, 'osaka')).map { |row| row[:name] })
+    end
+  end
+
+  def test_every_model_rejects_an_ill_typed_delta
+    [@memory, @sql, @sequel].each do |model|
+      assert_raises(Sodalite::DB::SchemaError, model.class.name) do
+        model.update(SCHEMA[:users].where(:id, 1), name: 7)
+      end
+    end
+  end
+
   def test_a_fold_compiles_to_group_by_and_an_order_to_a_total_order
     sql, = Sodalite::DB::SQL.compile(SCHEMA[:users].group(:city).count(:people).order(:people, :desc).limit(2))
 
