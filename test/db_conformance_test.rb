@@ -176,6 +176,22 @@ class DBConformanceTest < Minitest::Test
     },
     'a nullable column eliminated before the fold' => lambda { |s|
       s[:users].where_present(:nickname).group(:city).min(:nickname, as: :handle)
+    },
+
+    # An order over `A + 1`, which is where the three disagreed about a value
+    # rather than about cost. The fold is the sharp case: `min`/`max` are monoids
+    # on `A + 1` with `nothing` adjoined as the identity, so the osaka fibre —
+    # nothing the whole way down — folds to that identity, and ordering the result
+    # asks where the identity goes. It sorts after every element of `A`, in both
+    # directions, which is a rule the models hold rather than a default they
+    # inherit from a backend.
+    'an order over a nullable column' => ->(s) { s[:users].order(:nickname) },
+    'an order over a nullable column descending' => ->(s) { s[:users].order(:nickname, :desc) },
+    'an order over a fold of a fibre that is entirely nothing' => lambda { |s|
+      s[:users].group(:city).max(:nickname, as: :handle).order(:handle)
+    },
+    'an order over a fold of a fibre that is entirely nothing, descending' => lambda { |s|
+      s[:users].group(:city).max(:nickname, as: :handle).order(:handle, :desc)
     }
   }.freeze
 
@@ -251,12 +267,16 @@ class DBConformanceTest < Minitest::Test
     assert_includes Sodalite::DB::SQL.compile(query).first, 'FROM (SELECT DISTINCT'
   end
 
+  # The order is total, and it says where `nothing` goes: a fold over a fibre
+  # that is entirely nothing answers with the identity the monoid adjoined, and
+  # an order that leaves the placement of that identity to the backend is not a
+  # function of the set. `NULLS LAST` on every term, in both directions.
   def test_a_fold_compiles_to_group_by_and_an_order_to_a_total_order
     sql, = Sodalite::DB::SQL.compile(SCHEMA[:users].group(:city).count(:people).order(:people, :desc).limit(2))
 
     assert_equal 'SELECT "g"."city", COUNT(*) AS "people" FROM ' \
                  '(SELECT DISTINCT "t0"."id", "t0"."name", "t0"."city", "t0"."nickname" FROM "users" "t0") "g" ' \
-                 'GROUP BY "g"."city" ORDER BY "people" DESC, "city" ASC LIMIT 2', sql
+                 'GROUP BY "g"."city" ORDER BY "people" DESC NULLS LAST, "city" ASC NULLS LAST LIMIT 2', sql
   end
 
   # The coproduct compiles to UNION, which deduplicates — so it is set union,

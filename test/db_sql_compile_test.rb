@@ -106,7 +106,8 @@ class DBSqlCompileTest < Minitest::Test
     sql, = compile(RESERVED[:user].group(:group).count(:order).having(:order, :gt, 1).order(:order, :desc))
 
     assert_includes sql, 'SELECT "g"."group", COUNT(*) AS "order" FROM ('
-    assert_includes sql, ') "g" GROUP BY "g"."group" HAVING "order" > ? ORDER BY "order" DESC, "group" ASC'
+    assert_includes sql, ') "g" GROUP BY "g"."group" HAVING "order" > ? ' \
+                         'ORDER BY "order" DESC NULLS LAST, "group" ASC NULLS LAST'
   end
 
   def test_the_statements_a_model_runs_quote_their_identifiers

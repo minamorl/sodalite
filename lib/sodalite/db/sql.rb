@@ -230,10 +230,22 @@ module Sodalite
 
       # The order that is actually applied is the total one, so the two models
       # cannot disagree about how ties fall.
+      #
+      # `NULLS LAST` on every ordering, and not only on the nullable ones. An
+      # order is a function of the set or it is not an order, and `A + 1` has an
+      # element the column's declared type does not mention: `min`/`max` are
+      # monoids on `A + 1` with `nothing` adjoined as the identity, so a fold over
+      # a fibre that is entirely nothing answers with that identity, and ordering
+      # the result of one is ordering something no `?` in the schema marked. The
+      # three backends each had an answer of their own there — a raise, nulls
+      # first, nulls last — which is a disagreement about a value rather than
+      # about cost. So the placement is stated instead of inherited: `nothing`
+      # sorts after every element of `A`, in both directions, one rule and no case
+      # analysis, and the emitted text says which order it is.
       def order_by(query)
         return '' unless query.ordered?
 
-        ordered = query.total_ordering.map { |o| "#{quote(o.field)} #{o.direction.to_s.upcase}" }
+        ordered = query.total_ordering.map { |o| "#{quote(o.field)} #{o.direction.to_s.upcase} NULLS LAST" }
         " ORDER BY #{ordered.join(', ')}"
       end
 
