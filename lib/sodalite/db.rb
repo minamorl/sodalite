@@ -9,6 +9,7 @@ require_relative 'db/migration'
 require_relative 'db/plan'
 require_relative 'db/carries'
 require_relative 'db/ledger'
+require_relative 'db/change'
 require_relative 'db/query_checks'
 require_relative 'db/query_phases'
 require_relative 'db/query'
@@ -28,26 +29,40 @@ module Sodalite
   # nothing, so a handler map was a model of nothing in particular. The signature
   # here is fixed and small instead:
   #
-  #   SELECT(query)        -> Relation
-  #   INSERT(table, row)   -> key
-  #   DELETE(query)        -> count
-  #   ATOMICALLY(subtree)  -> Berylx::Ok / Berylx::Err
+  #   SELECT(query)          -> Relation
+  #   INSERT(table, row)     -> key
+  #   UPDATE(query, changes) -> count
+  #   DELETE(query)          -> count
+  #   ATOMICALLY(subtree)    -> Berylx::Ok / Berylx::Err
   #
-  # A handler map for those four is a **model of the relational theory over the
+  # A handler map for those five is a **model of the relational theory over the
   # schema**. `find_user` stops being an effect and goes back to being what it
   # always was: a named arrow, built once and reused. Application verbs remain
   # for the things that really are effects — send mail, charge a card — they just
   # stop being how a service reaches its own data.
+  #
+  # The behaviour ledger had this signature fixed at four, and it is five now.
+  # Said plainly, because widening a fixed signature is the kind of thing that is
+  # otherwise done quietly: the four-operation spelling of "change a value" is
+  # `SELECT`, `DELETE`, `INSERT` inside `ATOMICALLY`, and that is atomic without
+  # being serialisable under READ COMMITTED — two scopes read one row, the first
+  # deletes it, the second re-evaluates its guard against a row already gone and
+  # then writes a value computed from its stale read. No assignment-only fifth
+  # operation would have been safe either, for the same reason. What is safe is a
+  # change written as a function of the value it replaces, guarded inside the one
+  # statement that applies it, which is what `UPDATE` takes and what `Change` is.
+  # The argument is spelled out in `db/change.rb`.
   #
   # `Memory` and `Sql` are then two models of one theory rather than a stub and
   # the real thing, which is what `test/db_conformance_test.rb` exists to check.
   module DB
     SELECT = :sodalite_db_select
     INSERT = :sodalite_db_insert
+    UPDATE = :sodalite_db_update
     DELETE = :sodalite_db_delete
     ATOMICALLY = :sodalite_db_atomically
 
-    TAGS = [SELECT, INSERT, DELETE, ATOMICALLY].freeze
+    TAGS = [SELECT, INSERT, UPDATE, DELETE, ATOMICALLY].freeze
 
     module_function
 
@@ -116,12 +131,20 @@ module Sodalite
         {
           SELECT => ->(query) { model.select(query) },
           INSERT => ->(payload) { model.insert(payload[0], payload[1]) },
+          UPDATE => ->(payload) { model.update(payload[0], payload[1]) },
           DELETE => ->(query) { model.delete(query) },
-          ATOMICALLY => lambda { |payload|
-            node, focus = payload
-            model.atomically { Berylx::EffectTree.run(node, focus, handlers: rebuild.call({})) }
-          }
+          ATOMICALLY => ->(payload) { scope(payload, rebuild) }
         }
+      end
+
+      private
+
+      # Named rather than inlined so the map above stays one line per operation,
+      # which is the signature said in code — and the scope is the one entry that
+      # does not fit on a line.
+      def scope(payload, rebuild)
+        node, focus = payload
+        model.atomically { Berylx::EffectTree.run(node, focus, handlers: rebuild.call({})) }
       end
     end
 

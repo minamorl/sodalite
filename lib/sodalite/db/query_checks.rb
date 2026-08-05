@@ -10,6 +10,11 @@ module Sodalite
     # pullback compares an attribute of the object at the end of a path, and that
     # object is not the carrier; the carrier is only what the table defaults to.
     module QueryChecks
+      # `updatable!` is spelled here and half of what it refuses is spelled in
+      # `ChangeChecks`, so the dependency is declared rather than left to whoever
+      # mixes both into the same object.
+      include ChangeChecks
+
       # Deleting through an arrow means naming rows of the carrier, so the arrow
       # has to *be* a subobject of them. A projection, a fold, a coproduct, and a
       # window each leave that world — their elements are tuples, groups, or a
@@ -20,27 +25,50 @@ module Sodalite
       # codomain rather than of the object the arrow started at. That is almost
       # never what the caller meant, so it is said out loud or it is refused.
       def deletable!(confirm_carrier: nil)
-        refuse_delete!(:select, 'the image is a set of tuples, not of rows') if projection
-        refuse_delete!(:group, 'a fold yields groups, not rows') if grouped?
-        refuse_delete!(:union, 'the coproduct is not an object of the schema') if united?
-        refuse_delete!(:order, 'a window on a deletion is not a subobject') if ordered?
-        refuse_delete!(:limit, 'a window on a deletion is not a subobject') if limit_rows
-        refuse_delete!(:offset, 'a window on a deletion is not a subobject') if offset_rows
-        check_delete_carrier!(confirm_carrier)
+        subobject!(:delete, 'remove', confirm_carrier)
+      end
+
+      # An update names rows the same way, so it inherits every refusal above
+      # rather than restating it: the two operations differ in what they do to the
+      # rows an arrow names, not in which rows an arrow may name.
+      #
+      # What it adds is the pullback — whose guard cannot be evaluated inside the
+      # statement — and the changes themselves, which are judged here so that the
+      # models do not each judge them. Both live in `db/change.rb`, beside the
+      # vocabulary they are about.
+      def updatable!(changes, confirm_carrier: nil)
+        subobject!(:update, 'change', confirm_carrier)
+        check_no_pullback!
+        check_changes!(changes)
         self
       end
 
       private
 
-      def refuse_delete!(phase, reason)
-        raise QueryError, "delete needs a subobject of #{carrier}, and #{phase} is not one — #{reason}"
+      # The shared core. Each caller names its own operation, because a refusal
+      # that will not say which operation was refused is a refusal the reader has
+      # to guess at from the stack.
+      def subobject!(operation, verb, confirm_carrier)
+        window = "a window on a #{operation} is not a subobject"
+        refuse_subobject!(operation, :select, 'the image is a set of tuples, not of rows') if projection
+        refuse_subobject!(operation, :group, 'a fold yields groups, not rows') if grouped?
+        refuse_subobject!(operation, :union, 'the coproduct is not an object of the schema') if united?
+        refuse_subobject!(operation, :order, window) if ordered?
+        refuse_subobject!(operation, :limit, window) if limit_rows
+        refuse_subobject!(operation, :offset, window) if offset_rows
+        check_operation_carrier!(operation, verb, confirm_carrier)
+        self
       end
 
-      def check_delete_carrier!(confirm_carrier)
+      def refuse_subobject!(operation, phase, reason)
+        raise QueryError, "#{operation} needs a subobject of #{carrier}, and #{phase} is not one — #{reason}"
+      end
+
+      def check_operation_carrier!(operation, verb, confirm_carrier)
         return if carrier == root || confirm_carrier&.to_sym == carrier
 
         raise QueryError,
-              "delete over #{root} would remove rows of #{carrier} — " \
+              "#{operation} over #{root} would #{verb} rows of #{carrier} — " \
               "pass confirm_carrier: #{carrier.inspect} to mean it"
       end
 
