@@ -173,6 +173,57 @@ class DBMemoryFoldTest < Minitest::Test
   end
 end
 
+# A presentation is a total order, so it has to say where `nothing` goes — and
+# there are two ways to be handed one: a nullable column carries the adjoined
+# point outright, and `min`/`max` are monoids on `A + 1` that fold an entirely
+# nothing fibre to it.
+#
+# It goes after every element of A, in both directions. It is not an element
+# being ordered, it is the point adjoined to A, so the order on A never reaches
+# it and reversing that order cannot move it.
+class DBMemoryOrderTest < Minitest::Test
+  def setup
+    @model = Sodalite::DB.memory(MEMORY_SCHEMA, MEMORY_SEED)
+  end
+
+  def titles(query)
+    @model.select(query).map { |row| row[:title] }
+  end
+
+  def test_a_nothing_sorts_after_every_score
+    assert_equal %w[hello daily again orphan], titles(MEMORY_SCHEMA[:posts].order(:score))
+  end
+
+  # The same tail, not the reversed one, which is the sentence the other two
+  # models spell as `NULLS LAST` on every ordering they emit.
+  def test_a_nothing_sorts_after_every_score_descending_too
+    assert_equal %w[daily hello again orphan], titles(MEMORY_SCHEMA[:posts].order(:score, :desc))
+  end
+
+  # Which is what keeps a window meaning something: the two highest scores, and
+  # not two absences of one.
+  def test_a_window_on_a_descending_order_is_a_window_on_the_scores
+    assert_equal %w[daily hello], titles(MEMORY_SCHEMA[:posts].order(:score, :desc).limit(2))
+  end
+
+  # Two nothings tie, and a tie is broken by what makes the order total — the
+  # key, ascending, exactly as it is for two equal scores.
+  def test_two_nothings_tie_and_the_key_breaks_it
+    presented = @model.select(MEMORY_SCHEMA[:posts].order(:score))
+
+    assert_equal [11, 13], presented.map { |row| row[:id] }.last(2)
+  end
+
+  # And the identity a fold adjoined is placed by the same rule, because it is
+  # the same point.
+  def test_a_fibre_that_folded_to_the_adjoined_identity_sorts_last_either_way
+    folded = MEMORY_SCHEMA[:posts].group(:author).min(:score, as: :lowest)
+
+    assert_equal([1, 2, 99], @model.select(folded.order(:lowest)).map { |row| row[:author] })
+    assert_equal([2, 1, 99], @model.select(folded.order(:lowest, :desc)).map { |row| row[:author] })
+  end
+end
+
 # An instance is a functor into Set, and this is the one place that claim is
 # checkable. It is a diagnostic, so it reports and does not prevent.
 class DBMemoryFunctorTest < Minitest::Test

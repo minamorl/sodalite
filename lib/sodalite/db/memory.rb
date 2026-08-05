@@ -124,6 +124,10 @@ module Sodalite
                           .map { |row| @schema.dangling_message(table.name, field, row[field], target) }
       end
 
+      # One scan of the target per morphism, not per element of its domain:
+      # `dangling` binds this before it walks the domain, so the image of the
+      # target's key is built once and every row is then tested against the same
+      # set.
       def keys_of(target)
         key = @schema.table(target).key
         @store[target].to_set { |row| row[key] }
@@ -262,7 +266,28 @@ module Sodalite
         Listing[ordered, schema: query.row_schema]
       end
 
+      # The order is on `A + 1`, because that is what a presentation actually has
+      # to order: a nullable column carries the adjoined point outright, and
+      # `min`/`max` fold a fibre that is entirely nothing to it. Left alone,
+      # `nil <=> x` is nil and flipping that for a descending order raises — and
+      # SQL settles nothing on its own, since sqlite sorts the nothings first and
+      # postgres last. So this was three answers rather than a cost.
+      #
+      # `nothing` sorts **after** every element of A, in both directions. Not
+      # last ascending and first descending: it is not an element being ordered,
+      # it is the point adjoined to A, so the order on A never reaches it and
+      # reversing that order cannot move it. The other two say the same sentence
+      # in SQL, as `NULLS LAST` on every ordering. It is also the reading that
+      # keeps a window meaning something — `order(:score, :desc).limit(3)` is the
+      # three largest scores, not a presentation of three absences of one.
+      #
+      # Eliminating the `+ 1` first is what leaves the flip total: two elements
+      # of one declared type always compare.
       def compare(left, right, direction)
+        return 0 if left.nil? && right.nil?
+        return 1 if left.nil?
+        return -1 if right.nil?
+
         verdict = left <=> right
         direction == :desc ? -verdict : verdict
       end
