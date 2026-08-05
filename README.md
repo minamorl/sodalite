@@ -28,7 +28,7 @@ show_user = Sodalite::Route[
 
 app = Sodalite::App.new(
   routes:   [show_user],
-  handlers: Sodalite::Effects.real(find_user: ->(id) { DB.user(id) }),
+  handlers: Sodalite::Effects.real({ find_user: ->(id) { DB.user(id) } }),
   errors:   { not_found: 404 }
 )
 ```
@@ -94,8 +94,8 @@ handler map the app is running under. The same routes, the same router, the same
 workflow — with no database, no clock, and no socket:
 
 ```ruby
-Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.real(find_user: DB.method(:user)))
-Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.fixed(find_user: ->(_id) { { id: 7 } }))
+Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.real({ find_user: DB.method(:user) }))
+Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.fixed({ find_user: ->(_id) { { id: 7 } } }))
 ```
 
 The framework's own IO goes through the same door — `:sodalite_clock`, `:sodalite_id`,

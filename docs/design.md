@@ -44,8 +44,8 @@ handlers; a test supplies fixed ones. The same routes, the same router, the same
 workflow — with no database, no clock, and no socket:
 
 ```ruby
-Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.real(find_user: DB.method(:user)))
-Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.fixed(find_user: ->(_id) { { id: 7 } }))
+Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.real({ find_user: DB.method(:user) }))
+Sodalite::App.new(routes: ROUTES, handlers: Sodalite::Effects.fixed({ find_user: ->(_id) { { id: 7 } } }))
 ```
 
 This is not a testing convenience bolted on afterwards; it is what darkcore already is. The

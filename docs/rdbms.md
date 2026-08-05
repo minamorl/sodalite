@@ -153,7 +153,7 @@ This is the actual change, and everything else follows from it.
 Today:
 
 ```ruby
-handlers = Sodalite::Effects.real(find_user: ->(id) { ... }, insert_user: ->(name) { ... })
+handlers = Sodalite::Effects.real({ find_user: ->(id) { ... }, insert_user: ->(name) { ... } })
 ```
 
 The signature is whatever verbs the app invented. There are no equations, so a handler map is a model

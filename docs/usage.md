@@ -351,11 +351,15 @@ failure still carries which named task produced it.
 Everything else your service touches — mail, payments, anything — is an application effect:
 
 ```ruby
-Sodalite::Effects.real(send_mail: Mailer.method(:deliver))   # production
-Sodalite::Effects.fixed(send_mail: ->(subject) { subject })  # a test
+Sodalite::Effects.real({ send_mail: Mailer.method(:deliver) })   # production
+Sodalite::Effects.fixed({ send_mail: ->(subject) { subject } })  # a test
 ```
 
-The difference is not "real vs stub" — it is which handlers the framework's *own* IO gets.
+The effects go in as **one hash**, positionally. `real` and `fixed` take the world's own settings as
+keywords (`io:`, `now:`, `log:`), so an effect passed as a keyword is refused rather than guessed at —
+an effect tag and a setting must not share a namespace.
+
+The difference between them is not "real vs stub" — it is which handlers the framework's *own* IO gets.
 `:sodalite_clock`, `:sodalite_id`, `:sodalite_log`, and `:sodalite_contract` go through the same door,
 so under `fixed` the clock is frozen, ids are deterministic, and a contract breach raises. A whole
 request is reproducible byte for byte. An application tag colliding with a `:sodalite_*` tag raises at
