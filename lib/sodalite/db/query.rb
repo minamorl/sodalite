@@ -41,14 +41,14 @@ module Sodalite
     NO_OPERAND = ::Object.new.freeze
 
     Query = Data.define(:schema, :root, :carrier, :steps, :unions, :grouping, :aggregates,
-                        :havings, :orderings, :limit_rows, :offset_rows) do
+                        :havings, :orderings, :limit_rows, :offset_rows, :present_fields) do
       include QueryChecks
       include QueryPhases
 
       def self.start(schema, root)
         new(schema: schema, root: root, carrier: root, steps: [].freeze, unions: [].freeze,
             grouping: nil, aggregates: [].freeze, havings: [].freeze, orderings: [].freeze,
-            limit_rows: nil, offset_rows: nil)
+            limit_rows: nil, offset_rows: nil, present_fields: [].freeze)
       end
 
       def united?
@@ -70,7 +70,8 @@ module Sodalite
         check_fragment_open!(:follow)
         check_not_united!(:follow)
         target = schema.target_of(carrier, fk)
-        with(carrier: target, steps: (steps + [[:follow, fk.to_sym, target]]).freeze)
+        with(carrier: target, steps: (steps + [[:follow, fk.to_sym, target]]).freeze,
+             present_fields: [].freeze)
       end
 
       # A subobject of the current carrier.
@@ -101,7 +102,8 @@ module Sodalite
 
       def where_present(field)
         check_nullable!(field, :where_present)
-        with(steps: (steps + [[:null, field.to_sym, false]]).freeze)
+        with(steps: (steps + [[:null, field.to_sym, false]]).freeze,
+             present_fields: (present_fields + [field.to_sym]).uniq.freeze)
       end
 
       # The coproduct. SQL spells it `UNION`, which deduplicates — so it is the
@@ -114,7 +116,8 @@ module Sodalite
       # so C's morphisms no longer apply to it.
       def union(other)
         check_unionable!(other)
-        with(unions: (unions + [other]).freeze)
+        with(unions: (unions + [other]).freeze,
+             present_fields: (present_fields & other.present_fields).freeze)
       end
 
       # Image factorization: project, and therefore deduplicate. A projection

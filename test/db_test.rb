@@ -46,6 +46,10 @@ end
 # The carrier moves with composition, so what may be filtered afterwards moves
 # too — and that is checked when the arrow is built, not when it is run.
 class DBQueryBuildTest < Minitest::Test
+  NULLABLE_SCHEMA = Sodalite::DB.schema(
+    items: { id: :integer, score: :integer?, tag: :string }
+  )
+
   def test_a_field_that_is_not_on_the_current_carrier_is_a_build_error
     assert_raises(Sodalite::DB::QueryError) { SCHEMA[:posts].where(:city, 'tokyo') }
     assert_raises(Sodalite::DB::QueryError) { SCHEMA[:posts].follow(:author).where(:title, 'hi') }
@@ -104,6 +108,35 @@ class DBQueryBuildTest < Minitest::Test
 
   def test_an_aggregate_needs_a_group_to_fold_over
     assert_raises(Sodalite::DB::QueryError) { SCHEMA[:users].count(:people) }
+  end
+
+  def test_a_nullable_fold_needs_explicit_elimination
+    error = assert_raises(Sodalite::DB::QueryError) do
+      NULLABLE_SCHEMA[:items].group(:tag).sum(:score, as: :total)
+    end
+
+    assert_match(/where_present/, error.message)
+  end
+
+  def test_count_counts_elements_so_it_does_not_eliminate_a_nullable_value
+    query = NULLABLE_SCHEMA[:items].group(:score).count(:items)
+
+    assert_equal :count, query.aggregates.first.kind
+  end
+
+  def test_ordering_a_nullable_field_needs_explicit_elimination
+    error = assert_raises(Sodalite::DB::QueryError) { NULLABLE_SCHEMA[:items].order(:score) }
+
+    assert_match(/where_present/, error.message)
+    NULLABLE_SCHEMA[:items].where_present(:score).order(:score)
+  end
+
+  def test_a_nullable_group_key_cannot_be_an_implicit_ordering_tiebreak
+    error = assert_raises(Sodalite::DB::QueryError) do
+      NULLABLE_SCHEMA[:items].group(:score).count(:items).order(:items)
+    end
+
+    assert_match(/where_present/, error.message)
   end
 
   def test_ordering_by_something_that_is_not_in_the_result_is_a_build_error

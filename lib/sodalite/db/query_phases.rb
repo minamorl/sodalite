@@ -38,6 +38,7 @@ module Sodalite
         raise QueryError, "#{kind} needs a group to fold over" unless grouped?
 
         check_field!(field) if field
+        check_present!(field, kind) if field
         with(aggregates: (aggregates + [Aggregate.new(name: name.to_sym, kind: kind, field: field)]).freeze)
       end
 
@@ -51,6 +52,8 @@ module Sodalite
         raise QueryError, "unknown direction #{direction.inspect}" unless %i[asc desc].include?(direction)
 
         check_output_field!(field)
+        check_order_present!(field)
+        grouping&.each { |group_field| check_present!(group_field, :order) }
         with(orderings: (orderings + [Ordering.new(field: field.to_sym, direction: direction)]).freeze)
       end
 
