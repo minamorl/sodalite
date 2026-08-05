@@ -276,7 +276,7 @@ joins along a function and cannot repeat a row of the carrier.
 Three models, not a stub and the real thing: `DB.memory` (an instance functor into Set), `DB.sql`
 (arrows compiled to SQL text, no driver anywhere near it), and `DB.sequel` (the same arrows lowered
 onto Sequel's expression API, which knows dialects and quoting). `test/db_conformance_test.rb` drives
-fifty arrow shapes through all three and asserts they agree. That is the upgrade: the fixed world no
+sixty-five arrow shapes through all three and asserts they agree. That is the upgrade: the fixed world no
 longer returns what a test author decided, it computes the same query somewhere cheaper — and a bug
 would have to occur in three independent lowerings, identically, to survive.
 

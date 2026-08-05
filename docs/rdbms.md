@@ -457,7 +457,7 @@ whole point:
 > after: the fixed world computes the same query somewhere cheaper
 
 And it yields a runnable claim rather than a stated one: **across all three phases, the three models
-agree.** Fifty arrow shapes, evaluated in all three, asserted equal. A bug would have to occur in
+agree.** Sixty-five arrow shapes, evaluated in all three, asserted equal. A bug would have to occur in
 three independent lowerings, identically, to survive. That is a conformance
 suite in exactly the sense spec-system already uses — the same posture as `equiv:ruby:check`, and the
 same posture as feeding emitted RBS back to the real `RBS::Parser` instead of asserting on strings.
