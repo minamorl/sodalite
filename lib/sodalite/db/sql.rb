@@ -96,12 +96,25 @@ module Sodalite
       end
 
       def row_source(query)
-        clauses = query.steps.reduce(Clauses.for(query)) do |walk, (kind, *rest)|
-          phase_one(query, kind, rest, walk)
-        end
+        clauses = walk(query)
         ["SELECT #{'DISTINCT ' if query.distinct?}#{qualified_fields(query, clauses).join(', ')} " \
-         "FROM #{quote(query.root)} #{quote(clauses.root_alias)}" \
-         "#{clauses.joins.join}#{where_clause(clauses.wheres)}", clauses.binds]
+         "#{source_clause(query, clauses)}", clauses.binds]
+      end
+
+      # Phase one as accumulators rather than as text. Three statements need the
+      # walk and only one of them is a `SELECT`, so where it ends is a value.
+      def walk(query)
+        query.steps.reduce(Clauses.for(query)) do |clauses, (kind, *rest)|
+          phase_one(query, kind, rest, clauses)
+        end
+      end
+
+      # Where the rows come from and which of them are kept — everything a
+      # `SELECT` has after its field list, and everything a guarded subquery has
+      # after its key.
+      def source_clause(query, clauses)
+        "FROM #{quote(query.root)} #{quote(clauses.root_alias)}" \
+          "#{clauses.joins.join}#{where_clause(clauses.wheres)}"
       end
 
       # Each step answers with the walk that follows it, because one of them
@@ -242,6 +255,101 @@ module Sodalite
          fields.map { |field| row[field] }]
       end
 
+      # --- the statements that change rows ------------------------------------
+      # Each of these carries the arrow's own guard *inside* the statement that
+      # acts on it. That is the difference the surface exists for: the engine
+      # decides which rows are in the subobject while it holds them, so no value
+      # read into Ruby earlier is what decided.
+
+      # `:add` names the column on both sides — `"stock" = "stock" + ?` — so the
+      # new value is a function of the old one, computed by the engine from
+      # whatever the old one is by the time the row is held. A negative delta is
+      # the decrement; there is no second operation for it. `Change.ordered` is
+      # the one reading of a changes Hash, so the assignment list is in the order
+      # the Hash was written and three models cannot disagree about that either.
+      def update_statement(query, changes)
+        sets, values = assignments(changes)
+        guarded, guard_binds = guard(query)
+        ["UPDATE #{quote(query.carrier)} SET #{sets.join(', ')}#{guarded}", values + guard_binds]
+      end
+
+      def assignments(changes)
+        Change.ordered(changes).each_with_object([[], []]) do |(field, change), (sets, values)|
+          column = quote(field)
+          sets << "#{column} = #{change.kind == :add ? "#{column} + ?" : '?'}"
+          values << change.operand
+        end
+      end
+
+      # The deletion a connection that counts its own changes can run: the
+      # subobject named by the guard, with no key list to name it by and nothing
+      # read first.
+      def delete_statement(query)
+        guarded, binds = guard(query)
+        ["DELETE FROM #{quote(query.carrier)}#{guarded}", binds]
+      end
+
+      # How large that subobject is, for a connection that cannot say how many
+      # rows its own statement touched. It is the same guard, so the measurement
+      # and the statement cannot drift into naming different sets.
+      def count_statement(query)
+        guarded, binds = guard(query)
+        ["SELECT COUNT(*) FROM #{quote(query.carrier)}#{guarded}", binds]
+      end
+
+      # The subobject an operation names, said as a condition rather than as a
+      # list of keys read out first. Where the walk took no join the columns need
+      # no alias: the statement already stands on the one table they belong to,
+      # so the condition is the arrow's own `where` clauses verbatim.
+      def guard(query)
+        return joined_guard(query) if query.steps.any? { |kind, _| %i[follow pullback].include?(kind) }
+
+        conditions, binds = carrier_conditions(query)
+        [where_clause(conditions), binds]
+      end
+
+      def carrier_conditions(query)
+        query.steps.each_with_object([[], []]) do |(kind, field, operand, operator), (conditions, binds)|
+          case kind
+          when :where
+            conditions << "#{quote(field)} #{COMPARISONS.fetch(operator)} ?"
+            binds << operand
+          when :null
+            conditions << "#{quote(field)} IS #{'NOT ' unless operand}NULL"
+          end
+        end
+      end
+
+      # A composition and a pullback both emit a join, and a join inside an
+      # `UPDATE` or a `DELETE` is dialect-bound — `UPDATE ... FROM` on postgres,
+      # another spelling elsewhere. So the join stays in a subquery and the
+      # statement names its rows by the key that subquery selects. Still one
+      # statement, and the guard is still the engine's to evaluate rather than a
+      # set of keys carried back and forth.
+      def joined_guard(query)
+        clauses = walk(query)
+        key = query.schema.table(query.carrier).key
+        [" WHERE #{quote(key)} IN (SELECT #{qualify(clauses.alias_now, key)} " \
+         "#{source_clause(query, clauses)})", clauses.binds]
+      end
+
+      # A morphism with no value, in one statement per foreign key. The reading
+      # this replaces built the diagnostic out of arrows — every row of the
+      # source and every key of the target — which is elegant and is proportional
+      # to all the data for a question the database answers with an anti-join.
+      #
+      # `OR ... IS NULL` is load-bearing. `NOT IN` over a NULL is UNKNOWN, so the
+      # element whose morphism has no value *at all* — the one most worth
+      # reporting — would fall out of both sides of the anti-join and be reported
+      # by neither. It is asked for explicitly, which is what keeps this at the
+      # reading the model that evaluates in Set has.
+      def dangling_statement(schema, table, field, target)
+        column = quote(field)
+        "SELECT DISTINCT #{column} FROM #{quote(table.name)} " \
+          "WHERE #{column} NOT IN (SELECT #{quote(schema.table(target).key)} FROM #{quote(target)}) " \
+          "OR #{column} IS NULL"
+      end
+
       # A deletion names its rows by key, and how many it removed is measured
       # with the same subobject — so both statements are built here, together,
       # and cannot drift into naming different sets.
@@ -290,9 +398,19 @@ module Sodalite
     end
 
     # A model backed by anything that answers `execute(sql, binds) -> rows`,
-    # where a row is an Array of values in the order asked for. One method is the
-    # whole port, so sqlite3, pg, or a fake all plug in the same way and the gem
-    # depends on none of them.
+    # where a row is an Array of values in the order asked for. One method is
+    # still the whole *mandatory* port, so sqlite3, pg, or a fake all plug in the
+    # same way and the gem depends on none of them.
+    #
+    # A connection **may** answer a second, `change(sql, binds) -> Integer`, with
+    # the rows its statement affected. It is a capability the connection
+    # declares, not a requirement: every operation below has a reading that uses
+    # `execute` alone, the two readings answer with the same count, and a
+    # connection that never heard of it works exactly as before. What declaring
+    # it buys is the difference between one statement and a round trip
+    # proportional to the rows — `execute` reports no affected-row count, so
+    # without it a deletion has to name every doomed row by key and then count
+    # what is left of them.
     class Sql # rubocop:disable Metrics/ClassLength
       include Ledger
 
@@ -300,6 +418,10 @@ module Sodalite
       # caps how many placeholders one statement may carry — SQLite's default is
       # 999. So the bound is not a tuning knob: without it a deletion fails at
       # exactly the size where deleting it mattered.
+      #
+      # It belongs to the measured reading alone. A connection that answers
+      # `change` deletes by the guard itself, in a statement with no key list in
+      # it, and there is nothing left for a chunk to bound.
       DELETE_CHUNK = 500
 
       attr_reader :schema
@@ -355,22 +477,55 @@ module Sodalite
         row[table.key]
       end
 
+      # A change is judged before anything is emitted — `updatable!` refuses an
+      # arrow that is not a subobject of the carrier, a guard that is a pullback,
+      # and a change no column of it carries — and then applied in one statement
+      # with that guard inside it.
+      #
+      # Which is the whole operation. `SELECT`, `DELETE`, `INSERT` inside one
+      # scope is atomic and is not serialisable under READ COMMITTED: two scopes
+      # both read `stock = 1` and both write `0`. Here the engine evaluates the
+      # guard and computes `stock + ?` while it holds the row, so there is no
+      # earlier read for either of them to have taken.
+      #
+      # The count is the rows the change applied to, and it is how a caller
+      # learns it lost: a guarded decrement that comes back `0` found no row
+      # left to decrement. A connection that answers `change` has the count from
+      # the engine. Otherwise it is measured, and measured *before* the
+      # statement rather than after — a change moves rows out of the subobject
+      # that named them, which is exactly what `stock = stock - 1` under
+      # `stock > 0` does — with both readings in one scope, so nothing else can
+      # move a row between them.
+      def update(query, changes, confirm_carrier: nil)
+        query.updatable!(changes, confirm_carrier: confirm_carrier)
+        statement = SQL.update_statement(query, changes)
+        return @connection.change(*statement) if counts_changes?
+
+        atomically do
+          named = @connection.execute(*SQL.count_statement(query)).dig(0, 0)
+          @connection.execute(*statement)
+          named
+        end
+      end
+
       # A deletion is a subobject of the carrier, which is a thing an arrow can
       # fail to be — so the arrow is judged first, and `confirm_carrier` is how a
       # caller says out loud that it means to remove rows of a codomain.
       #
-      # The rows go in one statement per chunk inside one scope, so a driver that
-      # dies halfway leaves the whole subobject standing rather than an arbitrary
-      # part of it removed.
+      # One statement where the connection can say how many rows it removed: the
+      # guard goes inside the `DELETE`, and no doomed row is read at all.
       #
-      # The count is what was actually removed, and it is *measured*: the port
-      # answers with rows and no affected-row count, so it is the keys named
-      # minus the ones still there once the statement has run. Both readings
-      # happen inside the same scope, so nothing else can move a row between
-      # them. The count this replaces was taken before the delete and reported
-      # rows a dropped key had made it miss.
+      # Where it cannot, the count has to be *measured*, and measuring it is what
+      # makes the rows worth naming: the keys go out in one statement per chunk
+      # inside one scope, and what was removed is the keys named minus the ones
+      # still there once the statement has run. Both readings happen inside that
+      # scope, so nothing else can move a row between them. The count this
+      # replaces was taken before the delete and reported rows a dropped key had
+      # made it miss.
       def delete(query, confirm_carrier: nil)
         query.deletable!(confirm_carrier: confirm_carrier)
+        return @connection.change(*SQL.delete_statement(query)) if counts_changes?
+
         table = @schema.table(query.carrier)
         atomically do
           keys = select(query).rows.map { |row| row[table.key] }
@@ -397,18 +552,21 @@ module Sodalite
         end
       end
 
-      # Two arrows and a set difference, rather than the anti-join the fragment
-      # has no word for: the elements of the source, and the keys the morphism is
-      # supposed to land in.
+      # The anti-join the fragment has no word for, asked of the database in one
+      # statement instead of built out of two arrows and a set difference taken
+      # in Ruby. The arrows read every row of the source and every key of the
+      # target to answer it, which is the whole instance for a question the
+      # engine answers where it stands.
+      #
+      # The sentence still comes from the schema, so one broken morphism cannot
+      # come back as three different sentences. The order is taken on the
+      # rendering rather than on the values: a key is whatever the schema said it
+      # was, and two of them need not be comparable to each other, while the
+      # sentences always are.
       def dangling(table, field, target)
-        keys = keys_of(target)
-        loose = select(@schema[table.name]).reject { |row| keys.include?(row[field]) }
-        loose.map { |row| @schema.dangling_message(table.name, field, row[field], target) }
-      end
-
-      def keys_of(target)
-        key = @schema.table(target).key
-        select(@schema[target].select(key)).to_set { |row| row[key] }
+        @connection.execute(SQL.dangling_statement(@schema, table, field, target), [])
+                   .map { |row| @schema.dangling_message(table.name, field, row.first, target) }
+                   .sort
       end
 
       # --- the path equations, checkable --------------------------------------
@@ -534,6 +692,13 @@ module Sodalite
       end
 
       private
+
+      # The optional half of the port, asked of the connection rather than
+      # configured: a connection either answers `change(sql, binds)` or it does
+      # not, and there is nothing for a caller to get wrong about it.
+      def counts_changes?
+        @connection.respond_to?(:change)
+      end
 
       def insert_lock(token)
         columns = LOCK_COLUMNS.map { |column| SQL.quote(column) }.join(', ')
