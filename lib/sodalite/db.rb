@@ -69,8 +69,11 @@ module Sodalite
       Memory.new(schema, seed)
     end
 
-    def sql(schema, connection)
-      Sql.new(schema, connection)
+    # `transactional_ddl:` is forwarded rather than named again: the port is one
+    # method and cannot be asked whether its DDL rolls back, so the caller says,
+    # and there is one place that decides what the default is.
+    def sql(schema, connection, **)
+      Sql.new(schema, connection, **)
     end
 
     # A third model, over a `Sequel::Database` someone else built. Sequel is a

@@ -221,7 +221,7 @@ class DBSqlModelTest < Minitest::Test
     skip 'sqlite3 unavailable' unless COMPILE_SQLITE
 
     @recorder = Recorder.new
-    @model = Sodalite::DB.sql(SCHEMA, @recorder).create_tables!
+    @model = Sodalite::DB.sql(SCHEMA, @recorder).create_tables_for_test!
     SEED.each { |table, rows| rows.each { |row| @model.insert(table, row) } }
     @recorder.statements.clear
   end
@@ -306,7 +306,7 @@ class DBSqlModelTest < Minitest::Test
 
   def test_the_indexes_are_created_with_the_tables
     recorder = Recorder.new
-    Sodalite::DB.sql(SCHEMA, recorder).create_tables!
+    Sodalite::DB.sql(SCHEMA, recorder).create_tables_for_test!
 
     assert_includes recorder.statements, 'CREATE INDEX "index_posts_on_author" ON "posts" ("author")'
     assert_includes recorder.statements, 'CREATE INDEX "index_comments_on_post" ON "comments" ("post")'

@@ -143,8 +143,8 @@ class DBNestedScopeTest < Minitest::Test
     skip 'sqlite3 unavailable' unless DRIVERS
 
     [@memory,
-     Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables!,
-     Sodalite::DB.sequel(SCHEMA, Sequel.sqlite).create_tables!]
+     Sodalite::DB.sql(SCHEMA, Adapter.new).create_tables_for_test!,
+     Sodalite::DB.sequel(SCHEMA, Sequel.sqlite).create_tables_for_test!]
   end
 
   def run_nested(model, finish)

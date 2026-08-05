@@ -27,7 +27,7 @@ module Sodalite
         # lock from inside one. `Mutex` answers a second take with `ThreadError`.
         @lock = Monitor.new
         @depth = 0
-        @lock_token = nil
+        @lock_row = nil
       end
 
       def read_ledger = @applied.dup
@@ -42,18 +42,68 @@ module Sodalite
         nil
       end
 
+      # There is no race to lose here — the monitor settles it before the row is
+      # written — so this claims by writing the same row the other two models
+      # decide from, and answers from it for the same reason they do.
       def claim_lock(token)
         @lock.synchronize do
-          next false if @lock_token
+          next false if @lock_row
 
-          @lock_token = token
+          @lock_row = { token: token, holder: lock_holder, acquired_at: lock_acquired_at }
           true
         end
       end
 
+      def read_lock
+        @lock.synchronize { @lock_row&.dup }
+      end
+
       def release_lock(token)
-        @lock.synchronize { @lock_token = nil if @lock_token == token }
+        @lock.synchronize { @lock_row = nil if @lock_row&.fetch(:token) == token }
         nil
+      end
+
+      # A snapshot is as transactional as this model gets, and here that is the
+      # whole of it: there is no DDL, only a Hash of Arrays, and
+      # `migration_scope` puts every bit of it back.
+      def transactional_ddl? = true
+
+      # A migration step's scope. The snapshot is as deep as `atomically`'s,
+      # because a restored store that shared row Hashes with the failed one
+      # would carry the failure back in.
+      #
+      # The applied ledger is snapshotted with the store, and that pairing is
+      # the point: a step recorded against rows that were rolled back, or rows
+      # kept against a step that was not recorded, is exactly the state this
+      # scope exists to make unreachable.
+      #
+      # It unwinds on a raise rather than on an `Err` result, which is where it
+      # parts company with `atomically` — a migration block has no result to
+      # speak of, and `atomically`'s asymmetry (a raise leaves this model's
+      # writes standing) is fine for a request path and not fine for a step.
+      def migration_scope
+        @lock.synchronize do
+          store = @store.transform_values { |rows| rows.map(&:dup) }
+          applied = @applied.dup
+          yield
+        rescue StandardError
+          @store = store
+          @applied = applied
+          raise
+        end
+      end
+
+      # Two readings, taken before anything is carried. The sentences are
+      # `Preflight`'s, so this model and the other two refuse a step in one
+      # wording rather than three — and this is the model that would otherwise
+      # answer with a `KeyError` naming the tag it could not place.
+      def preflight_violations(step)
+        table, *rest = step.args
+        case step.kind
+        when :split_table then unlisted_tags(table, rest[0], rest[1], tag_values(table, rest[0]))
+        when :merge_tables then colliding_keys(key_of(rest[0]), key_holders(table, rest[0]))
+        else []
+        end
       end
 
       # --- the functor laws, checkable ---------------------------------------
@@ -235,6 +285,24 @@ module Sodalite
       end
 
       private
+
+      def tag_values(table, tag)
+        @store.fetch(table).map { |row| row[tag] }
+      end
+
+      def key_holders(sources, into)
+        key = key_of(into)
+        sources.each_with_object(Hash.new { |all, value| all[value] = [] }) do |source, holders|
+          @store.fetch(source).each { |row| holders[row[key]] << source }
+        end
+      end
+
+      # The sources of a coproduct share a shape, so they share the key the
+      # target has — and the target is the one of them the schema still knows
+      # about once the step has been applied to the presentation.
+      def key_of(into)
+        @schema.table(into).key
+      end
 
       def stringify(row)
         row.to_h { |field, value| [field.to_s, value] }
