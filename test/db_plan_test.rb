@@ -63,6 +63,32 @@ class DBPlanTest < Minitest::Test
                  right.plan.layers.map { |layer| layer.map(&:fingerprint) })
   end
 
+  def test_an_attribute_may_be_declared_before_the_table_that_supplies_it
+    history = Sodalite::DB.history(
+      [:add_attribute, :users, :city, :string, 'x'],
+      [:create_table, :users, { id: :integer, name: :string }]
+    )
+
+    assert_equal(%i[create_table add_attribute],
+                 history.plan.layers.map { |layer| layer.fetch(0).kind })
+    assert_equal %i[id name city], history.schema.table(:users).fields
+  end
+
+  def test_the_same_step_set_has_one_plan_and_schema_in_every_declaration_order
+    steps = [
+      [:create_table, :users, { id: :integer, name: :string }],
+      [:add_attribute, :users, :city, :string, 'x'],
+      [:create_table, :posts, { id: :integer, author: Sodalite::DB.fk(:users) }]
+    ]
+    histories = steps.permutation.map { |declaration| Sodalite::DB.history(*declaration) }
+
+    assert(histories.map { |history| history.plan.layers }
+                    .all? { |layers| layers == histories.first.plan.layers })
+    expected = histories.first.spec_at(histories.first.size)
+
+    assert(histories.all? { |history| history.spec_at(history.size) == expected })
+  end
+
   def test_independent_steps_share_a_layer_and_fingerprints_choose_the_order
     history = Sodalite::DB.history(
       [:create_table, :users, { id: :integer }],
