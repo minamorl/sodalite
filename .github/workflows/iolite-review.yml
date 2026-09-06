@@ -51,7 +51,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Run iolite
-        uses: minamorl/iolite@90f587460cec850b2995bbb75ee5172636c36d5d # completed-review status fix
+        uses: minamorl/iolite@6423b5a5a3dddb862cde82f1e94ff1a280b77866 # verified completion and commit binding
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
