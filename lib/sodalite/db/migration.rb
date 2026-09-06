@@ -5,7 +5,7 @@ require_relative 'plan'
 
 module Sodalite
   # Predicate derivation lives beside the functor it describes.
-  # rubocop:disable Metrics/ModuleLength
+  # rubocop:disable-next Metrics/ModuleLength
   module DB
     class MigrationError < KeyError; end
 
@@ -334,5 +334,4 @@ module Sodalite
       end
     end
   end
-  # rubocop:enable Metrics/ModuleLength
 end
